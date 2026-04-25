@@ -247,8 +247,7 @@ class GroundStationUI(QMainWindow):
         """
         
         self.style_done = """
-            background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
-                stop:0 #d4edda, stop:1 #4caf50);
+            background-color: #C8E6C9;
             color: #155724;
             font-weight: bold;
             border: 3px solid #388e3c;
@@ -585,14 +584,12 @@ class GroundStationUI(QMainWindow):
                 btn.setStyleSheet(self.style_takeoff)
                 continue
 
-            if gid in self.nofly_zones:
-                btn.setText(self.grid_data.get(gid, "00000"))
-                btn.setStyleSheet(self.style_nofly)
-                continue
-
             btn.setText(self.grid_data.get(gid, "00000"))
             if gid in self.detected_cells:
                 btn.setStyleSheet(self.style_done)
+                continue
+            if gid in self.nofly_zones:
+                btn.setStyleSheet(self.style_nofly)
             else:
                 btn.setStyleSheet(self.style_normal)
 
@@ -664,11 +661,18 @@ class GroundStationUI(QMainWindow):
             self.grid_data[gid] = normalized
             self.detected_cells.add(gid)
             btn.setText(normalized)
-            if gid in self.nofly_zones:
-                btn.setStyleSheet(self.style_nofly)
-            else:
-                btn.setStyleSheet(self.style_done)
+            btn.setStyleSheet(self.style_done)
             self.calculate_totals()
+
+    def update_grid_arrival(self, gid):
+        if gid not in self.grid_widgets:
+            return
+        if gid in self.detected_cells:
+            return
+        btn = self.grid_widgets[gid]
+        self.detected_cells.add(gid)
+        btn.setText(self.grid_data.get(gid, "00000"))
+        btn.setStyleSheet(self.style_done)
 
     def update_plane_position(self, grid_id):
         if grid_id not in self.grid_widgets:
