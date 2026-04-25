@@ -1,5 +1,5 @@
 import math
-from PyQt5.QtWidgets import QMainWindow, QWidget, QGridLayout, QPushButton, QVBoxLayout, QHBoxLayout, QLabel, QSizePolicy
+from PyQt5.QtWidgets import QMainWindow, QWidget, QGridLayout, QPushButton, QVBoxLayout, QHBoxLayout, QLabel, QSizePolicy, QFormLayout, QLineEdit
 from PyQt5.QtCore import Qt, QTimer, QPointF
 from PyQt5.QtGui import QFont, QPainter, QPen, QColor, QPolygonF
 
@@ -166,24 +166,14 @@ class GroundStationUI(QMainWindow):
         self.initUI()
 
     def initUI(self):
-        self.setWindowTitle('无人机地面站控制系统 v2.0')
-        self.resize(1280, 720)
-        
-        # 现代化配色方案
-        self.setStyleSheet("""
-            QMainWindow {
-                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
-                    stop:0 #f8f9fa, stop:1 #e9ecef);
-            }
-            QLabel {
-                color: #2c3e50;
-                font-family: 'Microsoft YaHei UI', 'Segoe UI', sans-serif;
-            }
-        """)
+        self.setWindowTitle('电赛H题 - 战术地面站 (高稳自适应版)')
+        self.resize(1024, 600)
+        self.setStyleSheet("background-color: #F5F7FA; color: #333333;")
 
         main_layout = QHBoxLayout()
-        main_layout.setSpacing(15)
-        main_layout.setContentsMargins(15, 15, 15, 15)
+        grid_container = QGridLayout()
+        grid_container.setSpacing(6)
+        grid_container.setContentsMargins(10, 10, 10, 10)
         
         # 左侧网格容器
         grid_container = QVBoxLayout()
@@ -326,6 +316,41 @@ class GroundStationUI(QMainWindow):
         status_layout = QVBoxLayout(status_panel)
         status_layout.setContentsMargins(15, 15, 15, 15)
         
+        # ====== IP & Port 网络配置区 ======
+        ip_panel = QWidget()
+        ip_panel.setStyleSheet("""
+            background-color: white;
+            border-radius: 10px;
+            border: 2px solid #e3f2fd;
+        """)
+        ip_layout = QFormLayout(ip_panel)
+        ip_layout.setContentsMargins(15, 15, 15, 15)
+        
+        self.ip_input = QLineEdit("127.0.0.1")
+        self.port_send_input = QLineEdit("8889")
+        self.port_recv_input = QLineEdit("8888")
+        
+        # add labels
+        self.apply_ip_btn = QPushButton("应用网络配置")
+        self.apply_ip_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #1976d2; 
+                color: white; 
+                border-radius: 4px; 
+                padding: 5px;
+            }
+            QPushButton:hover { background-color: #1565C0; }
+        """)
+
+        ip_layout.addRow(QLabel("接受端口:"), self.port_recv_input)
+        ip_layout.addRow(QLabel("目标IP:"), self.ip_input)
+        ip_layout.addRow(QLabel("发送端口:"), self.port_send_input)
+        ip_layout.addWidget(self.apply_ip_btn)
+        
+        side_panel.addWidget(ip_panel)
+
+        # 移动 status_lbl 初始化到这里以防止被覆盖或未初始化
+        # =========== StatusBar/Message Panel ===========
         self.status_lbl = QLabel("通信状态: 待连接...")
         self.status_lbl.setFont(QFont('Microsoft YaHei UI', 11))
         self.status_lbl.setStyleSheet("""
@@ -334,60 +359,37 @@ class GroundStationUI(QMainWindow):
             background-color: #e3f2fd;
             border-radius: 6px;
         """)
-        status_layout.addWidget(self.status_lbl)
+        # We assume side_panel already exists
+        side_panel.addWidget(self.status_lbl)
 
         self.info_label = QLabel("禁飞区数: 0\n航点总数: 0")
-        self.info_label.setFont(QFont('Microsoft YaHei UI', 11))
-        self.info_label.setStyleSheet("""
-            color: #2e7d32;
-            padding: 8px;
-            background-color: #f1f8e9;
-            border-radius: 6px;
-            margin-top: 8px;
-        """)
-        status_layout.addWidget(self.info_label)
-        
-        side_panel.addWidget(status_panel)
-        
-        # 统计面板
-        stat_panel = QWidget()
-        stat_panel.setStyleSheet("""
-            background-color: white;
-            border-radius: 10px;
-            border: 2px solid #fff3e0;
-        """)
-        stat_layout = QVBoxLayout(stat_panel)
-        stat_layout.setContentsMargins(15, 15, 15, 15)
-        
-        stat_title = QLabel("🦁 动物数量统计")
+        self.info_label.setFont(QFont('微软雅黑', 11))
+        self.info_label.setStyleSheet("color: #2E7D32;")
+        side_panel.addWidget(self.info_label)
+
+        # 动物数量统计标题
+        stat_title = QLabel("动物数量汇总")
         stat_title.setFont(QFont('Microsoft YaHei UI', 14, QFont.Bold))
         stat_title.setStyleSheet("""
-            color: #e65100;
+            color: #2E7D32;
             padding: 8px;
-            background-color: #fff3e0;
+            background-color: #e8f5e9;
             border-radius: 6px;
+            border: 2px solid #c8e6c9;
         """)
-        stat_layout.addWidget(stat_title)
+        stat_title.setAlignment(Qt.AlignCenter)
+        side_panel.addWidget(stat_title)
 
+        # 动物数量统计标签
         self.stat_labels = {}
-        animal_icons = ["🐘", "🐵", "🦚", "🐺", "🐯"]
-        for i, name in enumerate(self.animal_names):
-            lbl = QLabel(f"{animal_icons[i]} {name}: 0")
-            lbl.setFont(QFont('Microsoft YaHei UI', 12))
-            lbl.setStyleSheet("""
-                color: #424242;
-                padding: 6px;
-                margin: 2px;
-                background-color: #fafafa;
-                border-radius: 4px;
-            """)
-            stat_layout.addWidget(lbl)
+        for name in self.animal_names:
+            lbl = QLabel(f"{name}: 0")
+            lbl.setFont(QFont('微软雅黑', 11))
+            lbl.setStyleSheet("color: #2E7D32; padding: 4px;")
+            side_panel.addWidget(lbl)
             self.stat_labels[name] = lbl
-        
-        side_panel.addWidget(stat_panel)
-        side_panel.addStretch()
 
-        # 控制按钮组
+        # 手动/自动规划按钮
         btn_style_base = """
             QPushButton {
                 color: white;

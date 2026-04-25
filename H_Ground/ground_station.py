@@ -18,8 +18,37 @@ class MainController:
         self.ui.plan_btn.clicked.connect(self.handle_plan_route)
         self.ui.send_btn.clicked.connect(self.handle_send_route)
         
+        self.ui.apply_ip_btn.clicked.connect(self.handle_apply_ip)
+
         self.comm.data_received.connect(self.handle_drone_data)
         self.comm.status_update.connect(self.ui.update_status_msg)
+
+    def handle_apply_ip(self):
+        new_ip = self.ui.ip_input.text().strip()
+        
+        try:
+            new_send_port = int(self.ui.port_send_input.text().strip())
+        except ValueError:
+            new_send_port = 8889
+            
+        try:
+            new_recv_port = int(self.ui.port_recv_input.text().strip())
+        except ValueError:
+            new_recv_port = 8888
+            
+        # 1. Stop old communication
+        self.comm.stop()
+        self.comm.wait()
+        
+        # 2. Re-instantiate
+        self.comm = UDPComm(local_port=new_recv_port, drone_ip=new_ip, drone_port=new_send_port)
+        
+        # 3. Re-bind
+        self.comm.data_received.connect(self.handle_drone_data)
+        self.comm.status_update.connect(self.ui.update_status_msg)
+        
+        # 4. Start again
+        self.comm.start()
 
     def handle_plan_route(self):
         nofly_zones = self.ui.nofly_zones
@@ -59,7 +88,20 @@ class MainController:
         if not route_list or len(route_list) < 2:
             return
             
-        # 根据规则生成带有 Tag 的航点字符串
+        # 1. 计算正确的返航点(R)起始索引：最后一个出现的新网格(P)的下一个点
+        temp_visited = set()
+        last_p_idx = -1
+        # 最后一点起飞点(准备降落)不参与判定
+        for i in range(len(route_list) - 1):
+            wp = route_list[i]
+            if wp not in temp_visited:
+                last_p_idx = i
+                temp_visited.add(wp)
+                
+        # 超过此索引的全部是纯返航过程
+        return_start_idx = last_p_idx + 1 if last_p_idx != -1 else len(route_list)
+            
+        # 2. 根据规则生成带有 Tag 的航点字符串
         tagged_route = []
         visited = set()
         
@@ -69,8 +111,8 @@ class MainController:
                 tagged_route.append(f"{wp}:L")
             else:
                 # 如果这个网格是返航路径上的
-                if hasattr(self.ui, 'return_start_index') and self.ui.return_start_index is not None and i >= self.ui.return_start_index:
-                     tagged_route.append(f"{wp}:R")
+                if i >= return_start_idx:
+                    tagged_route.append(f"{wp}:R")
                 else:
                     if wp not in visited:
                         tagged_route.append(f"{wp}:P")
