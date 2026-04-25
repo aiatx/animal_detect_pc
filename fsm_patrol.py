@@ -3,10 +3,11 @@ import rospy
 import math
 import json
 import time
+import socket
 from geometry_msgs.msg import PoseStamped
 from mavros_msgs.srv import CommandBool, SetMode
 from mavros_msgs.msg import State
-from std_msgs.msg import String  # 接收视觉节点的动物名字
+from std_msgs.msg import String
 
 # ================= 全局变量与状态枚举 =================
 current_state = State()
@@ -22,12 +23,13 @@ STATE_LANDING = 5  # 45度斜线下砸
 fsm_state = STATE_IDLE
 
 # 视觉系统的状态锁与记忆小本本
-vision_enabled = False  # 只有在 P 模式下才设为 True
-detected_animals = set()  # 记录已经画过圈的动物，防重复打断
+vision_enabled = False
+detected_animals = set()
 draw_start_time = 0
+current_grid_code = "UNKNOWN"  # 记录当前所在的网格，用于战报回传
 
 
-# ================= 回调函数 =================
+# ================= 回调函数与通信函数 =================
 def state_cb(msg):
     global current_state
     current_state = msg
@@ -38,24 +40,36 @@ def pos_cb(msg):
     current_pos = msg
 
 
-# 视觉打断回调函数 (极其敏锐的神经反射)
+def report_to_ground_station(animal, grid):
+    """把战报用 UDP 发回高级地面站"""
+    GS_IP = "127.0.0.1"  # 默认发往本地 IP
+    GS_PORT = 8888  # 适配你们的高级地面站监听端口
+
+    msg = f"REPORT:{animal}@{grid}"
+    try:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        sock.sendto(msg.encode('utf-8'), (GS_IP, GS_PORT))
+        rospy.loginfo(f"已向高级地面站发送战报: {msg}")
+    except Exception as e:
+        rospy.logerr(f"战报发送失败: {e}")
+
+
 def vision_cb(msg):
-    global fsm_state, draw_start_time, detected_animals, vision_enabled
+    global fsm_state, draw_start_time, detected_animals, vision_enabled, current_grid_code
     animal_name = msg.data
 
-    # 触发悬停的三个硬性条件：
-    # 1. 允许视觉 (当前在:P路段)
-    # 2. 当前处于巡航状态 (没在起飞或降落)
-    # 3. 这个动物是第一次见 (不在小本本里)
+    # 触发悬停的三个硬性条件：1.允许视觉 2.正在巡航 3.第一次遇见
     if vision_enabled and fsm_state == STATE_PATROL and (animal_name not in detected_animals):
-        rospy.logwarn(f"!!! 真实视觉预警：发现 {animal_name}，紧急悬停 !!!")
+        rospy.logwarn(f"!!! 真实视觉预警：在 {current_grid_code} 发现 {animal_name}，紧急悬停 !!!")
 
-        # 记入小本本，终生不再理会它
         detected_animals.add(animal_name)
 
-        # 记录当前时间并瞬间打断状态！
+        # 瞬间打断状态
         draw_start_time = time.time()
         fsm_state = STATE_DRAWING
+
+        # 呼叫地面站
+        report_to_ground_station(animal_name, current_grid_code)
 
 
 def get_distance(p1_x, p1_y, p1_z, p2_x, p2_y, p2_z):
@@ -64,13 +78,11 @@ def get_distance(p1_x, p1_y, p1_z, p2_x, p2_y, p2_z):
 
 # ================= 核心状态机主循环 =================
 def main_loop():
-    global fsm_state, vision_enabled
+    global fsm_state, vision_enabled, current_grid_code
     rospy.init_node('fsm_patrol_node', anonymous=True)
 
     rospy.Subscriber("mavros/state", State, state_cb)
     rospy.Subscriber("mavros/local_position/pose", PoseStamped, pos_cb)
-
-    # 订阅视觉节点的话题 (假设你的 YOLO 节点发到这个名字)
     rospy.Subscriber("/vision/animal_detect", String, vision_cb)
 
     local_pos_pub = rospy.Publisher("mavros/setpoint_position/local", PoseStamped, queue_size=10)
@@ -82,13 +94,13 @@ def main_loop():
     rate = rospy.Rate(RATE_HZ)
     dt = 1.0 / RATE_HZ
 
-    # 1. 加载地面站传来的 JSON 航点
+    # 1. 加载接收端翻译好的 JSON 航点
     try:
         with open("flight_mission.json", "r") as f:
             mission_wps = json.load(f)
         rospy.loginfo(f"成功加载 JSON！共 {len(mission_wps)} 个航点。")
     except Exception as e:
-        rospy.logerr("找不到 flight_mission.json！请先运行 udp 接收端并从地面站发数据！")
+        rospy.logerr("找不到 flight_mission.json！请检查接收节点是否正常运行。")
         return
 
     # 飞控连通性检查
@@ -102,7 +114,6 @@ def main_loop():
         local_pos_pub.publish(pose)
         rate.sleep()
 
-    # 初始化飞行参数
     wp_index = 0
     TOLERANCE = 0.2
 
@@ -110,9 +121,9 @@ def main_loop():
 
     while not rospy.is_shutdown():
 
-        # ==========================================
+        # ------------------------------------------
         # 状态 0: 待机并解锁
-        # ==========================================
+        # ------------------------------------------
         if fsm_state == STATE_IDLE:
             if current_state.mode != "OFFBOARD":
                 set_mode_client(custom_mode="OFFBOARD")
@@ -122,9 +133,9 @@ def main_loop():
                 rospy.loginfo(">> [起飞] 目标高度 Z=1.2m")
                 fsm_state = STATE_TAKEOFF
 
-        # ==========================================
+        # ------------------------------------------
         # 状态 1: 直上起飞
-        # ==========================================
+        # ------------------------------------------
         elif fsm_state == STATE_TAKEOFF:
             pose.pose.position.x = 0
             pose.pose.position.y = 0
@@ -135,29 +146,30 @@ def main_loop():
                 rospy.loginfo(">> [进入巡航网络]")
                 fsm_state = STATE_PATROL
 
-        # ==========================================
-        # 状态 2: 智能网络巡航 (核心大脑)
-        # ==========================================
+        # ------------------------------------------
+        # 状态 2: 智能网络巡航
+        # ------------------------------------------
         elif fsm_state == STATE_PATROL:
             if wp_index >= len(mission_wps):
-                rospy.logerr("致命错误：航点跑完了却没有触发降落？检查 L 标签！")
+                rospy.logerr("警告：航点越界。")
                 break
 
             target = mission_wps[wp_index]
             current_task = target.get("task", "P")
+            current_grid_code = target["grid"]  # 实时更新当前网格，供视觉回调使用
 
             # 【动态变速箱与视觉开关锁】
-            if current_task == "P":  # 巡查区
+            if current_task == "P":
                 current_speed = 2.0
-                vision_enabled = True  # 允许视觉打断
-            elif current_task in ["T", "R", "L"]:  # 穿梭、返航、最后降落点
-                current_speed = 4.0  # 极速狂飙
-                vision_enabled = False  # 屏蔽视觉，绝不停顿
+                vision_enabled = True
+            elif current_task in ["T", "R", "L"]:
+                current_speed = 4.0
+                vision_enabled = False
 
             STEP_DIST = current_speed * dt
 
             # 【平滑胡萝卜引导法】
-            if fsm_state == STATE_PATROL:  # 确保没被视觉中断
+            if fsm_state == STATE_PATROL:
                 dx = target["x"] - pose.pose.position.x
                 dy = target["y"] - pose.pose.position.y
                 dist = math.sqrt(dx ** 2 + dy ** 2)
@@ -169,35 +181,32 @@ def main_loop():
                     pose.pose.position.x = target["x"]
                     pose.pose.position.y = target["y"]
 
-                # 判断是否到达当前网格点
                 real_dist = get_distance(current_pos.pose.position.x, current_pos.pose.position.y, 1.2, target["x"],
                                          target["y"], 1.2)
                 if real_dist < TOLERANCE:
                     rospy.loginfo(f"√ 到达 {target['grid']} [标签:{current_task}]")
 
-                    # 如果踩到 L 标签的全场最后一个点 (A9B1)
                     if current_task == "L":
                         rospy.loginfo(">> [全场最后一点到达！触发退避动作]")
                         fsm_state = STATE_RETREAT
                     else:
                         wp_index += 1
 
-        # ==========================================
+        # ------------------------------------------
         # 状态 3: 绘制轮廓 (悬停打断)
-        # ==========================================
+        # ------------------------------------------
         elif fsm_state == STATE_DRAWING:
             elapsed = time.time() - draw_start_time
-            if elapsed < 3.0:  # 原地悬停 3 秒代表画完了
+            if elapsed < 3.0:
                 pass
             else:
                 rospy.loginfo(">> [画图完毕，恢复高速巡航]")
                 fsm_state = STATE_PATROL
 
-        # ==========================================
-        # 状态 4: 降落前退避 (完美几何逻辑)
-        # ==========================================
+        # ------------------------------------------
+        # 状态 4: 降落前退避
+        # ------------------------------------------
         elif fsm_state == STATE_RETREAT:
-            # 起飞点是 (0,0)。为了满足 45 度降落，向 Y 轴正方向退避 1.2m
             target_x, target_y, target_z = 0.0, 1.2, 1.2
 
             dx = target_x - pose.pose.position.x
@@ -216,12 +225,11 @@ def main_loop():
                                      target_z)
             if real_dist < TOLERANCE:
                 rospy.loginfo(">> [退避完成！执行 45度斜线 LANDING]")
-                # 赛场上在这里通过 GPIO 控制 LED
                 fsm_state = STATE_LANDING
 
-        # ==========================================
+        # ------------------------------------------
         # 状态 5: 45度斜降
-        # ==========================================
+        # ------------------------------------------
         elif fsm_state == STATE_LANDING:
             target_x, target_y, target_z = 0.0, 0.0, 0.0
 
@@ -230,7 +238,6 @@ def main_loop():
             dz = target_z - pose.pose.position.z
             dist = math.sqrt(dx ** 2 + dy ** 2 + dz ** 2)
 
-            # 降落时必须极其温柔，调低步长到 0.5m/s
             LAND_SPEED = 0.5 * dt
 
             if dist > LAND_SPEED:
@@ -242,7 +249,6 @@ def main_loop():
                 set_mode_client(custom_mode="AUTO.LAND")
                 break
 
-                # 将姿态打入飞控
         local_pos_pub.publish(pose)
         rate.sleep()
 
