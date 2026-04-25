@@ -64,7 +64,6 @@ class GroundStationUI(QMainWindow):
         super().__init__()
         self.grid_widgets = {}
         self.nofly_zones = []
-        self.detected_cells = set()
         self.columns = [f'A{i}' for i in range(1, 10)]
         self.rows = [f'B{i}' for i in range(1, 8)]
         self.start_point = 'A9_B1'
@@ -215,7 +214,6 @@ class GroundStationUI(QMainWindow):
 
     def reset_ui(self):
         self.nofly_zones.clear()
-        self.detected_cells.clear()
         self.info_label.setText("禁飞区数: 0\n航点总数: 0")
         if hasattr(self, 'timer'): self.timer.stop()
         self.plan_btn.setEnabled(True)
@@ -240,23 +238,9 @@ class GroundStationUI(QMainWindow):
     def update_grid_result(self, gid, animal_code):
         if gid in self.grid_widgets:
             btn = self.grid_widgets[gid]
-            if gid in self.detected_cells and btn.text() != "00000":
-                return
             btn.setText(animal_code)
-            self.detected_cells.add(gid)
             btn.setStyleSheet(self.style_done)
             self.calculate_totals()
-
-    def update_grid_arrival(self, gid):
-        if gid not in self.grid_widgets:
-            return
-        if gid in self.detected_cells:
-            return
-        btn = self.grid_widgets[gid]
-        self.detected_cells.add(gid)
-        if btn.text() == "禁飞":
-            btn.setText("00000")
-        btn.setStyleSheet(self.style_done)
 
     def animate_path(self, route_list):
         self.info_label.setText(f"禁飞区数: {len(self.nofly_zones)}\n规划成功! 航点数: {len(route_list)}")

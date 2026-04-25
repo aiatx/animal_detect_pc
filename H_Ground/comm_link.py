@@ -8,6 +8,8 @@ class UDPComm(QThread):
     # status_update 用来向主程序汇报：网络连上了/断开了！
     data_received = pyqtSignal(str) 
     status_update = pyqtSignal(str)
+    arrival_received = pyqtSignal(str)
+    report_received = pyqtSignal(str, str)
 
     def __init__(self, local_port=8888, drone_ip="192.168.1.100", drone_port=8889):
         super().__init__()
@@ -39,8 +41,27 @@ class UDPComm(QThread):
                 data, addr = self.sock.recvfrom(1024)
                 message = data.decode('utf-8').strip()
                 if message:
-                    # 收到真实数据，立刻发射给主控 (ground_station.py 里的 handle_drone_data)
-                    self.data_received.emit(message)
+                    if message.startswith("ARRIVED:"):
+                        grid_id = message.split(":", 1)[1].strip()
+                        if grid_id:
+                            self.arrival_received.emit(grid_id)
+                        else:
+                            self.data_received.emit(message)
+                    elif message.startswith("REPORT:"):
+                        payload = message.split(":", 1)[1].strip()
+                        if "@" in payload:
+                            animal_code, grid_id = payload.split("@", 1)
+                            animal_code = animal_code.strip()
+                            grid_id = grid_id.strip()
+                            if animal_code and grid_id:
+                                self.report_received.emit(grid_id, animal_code)
+                            else:
+                                self.data_received.emit(message)
+                        else:
+                            self.data_received.emit(message)
+                    else:
+                        # 收到真实数据，立刻发射给主控 (ground_station.py 里的 handle_drone_data)
+                        self.data_received.emit(message)
             except socket.timeout:
                 pass # 超时是正常的，说明这 0.1 秒内没收到数据，继续循环即可
             except Exception:

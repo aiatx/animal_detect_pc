@@ -21,6 +21,8 @@ class MainController:
         self.ui.apply_ip_btn.clicked.connect(self.handle_apply_ip)
 
         self.comm.data_received.connect(self.handle_drone_data)
+        self.comm.arrival_received.connect(self.handle_drone_arrival)
+        self.comm.report_received.connect(self.handle_drone_report)
         self.comm.status_update.connect(self.ui.update_status_msg)
 
     def handle_apply_ip(self):
@@ -45,6 +47,8 @@ class MainController:
         
         # 3. Re-bind
         self.comm.data_received.connect(self.handle_drone_data)
+        self.comm.arrival_received.connect(self.handle_drone_arrival)
+        self.comm.report_received.connect(self.handle_drone_report)
         self.comm.status_update.connect(self.ui.update_status_msg)
         
         # 4. Start again
@@ -126,14 +130,36 @@ class MainController:
 
     def handle_drone_data(self, data):
         try:
+            if data.startswith("ARRIVED:"):
+                grid_id = data.split(":", 1)[1].strip()
+                if grid_id:
+                    self.handle_drone_arrival(grid_id)
+                return
+            if data.startswith("REPORT:"):
+                payload = data.split(":", 1)[1].strip()
+                if "@" in payload:
+                    animal_code, grid_id = payload.split("@", 1)
+                    self.handle_drone_report(grid_id.strip(), animal_code.strip())
+                return
             if ":" in data:
-                grid_id, animal_code = data.split(":")
+                grid_id, animal_code = data.split(":", 1)
                 grid_id = grid_id.strip()
                 animal_code = animal_code.strip()
-                self.ui.update_grid_result(grid_id, animal_code)
-                self.ui.update_plane_position(grid_id)
+                self.handle_drone_report(grid_id, animal_code)
         except Exception as e:
             print(f"数据解析出错: {data}")
+
+    def handle_drone_report(self, grid_id, animal_code):
+        self.ui.update_grid_result(grid_id, animal_code)
+        if hasattr(self.ui, "update_plane_position"):
+            self.ui.update_plane_position(grid_id)
+
+    def handle_drone_arrival(self, grid_id):
+        self.ui.update_status_msg(f"无人机已抵达 {grid_id}")
+        if hasattr(self.ui, "update_grid_arrival"):
+            self.ui.update_grid_arrival(grid_id)
+        if hasattr(self.ui, "update_plane_position"):
+            self.ui.update_plane_position(grid_id)
 
 if __name__ == '__main__':
     app = QApplication(sys.argv)
