@@ -23,9 +23,8 @@ class UDPComm(QThread):
     def run(self):
         """这是运行在后台的监听线程，死盯 UDP 端口"""
         try:
-            # 开启 SO_REUSEADDR 允许重新绑定断开未释分的端口
+            # 创建 UDP 套接字
             self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-            self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
             # 绑定树莓派自己的端口，准备接收飞机的回复
             self.sock.bind(('', self.local_port))
             # 发射状态信号给 UI
@@ -84,8 +83,4 @@ class UDPComm(QThread):
         """安全退出机制"""
         self.is_running = False
         if self.sock:
-            try:
-                self.sock.close()
-            except Exception:
-                pass
-        self.wait()
+            self.sock.close()
