@@ -15,21 +15,36 @@ current_pos = PoseStamped()
 
 STATE_IDLE = 0
 STATE_TAKEOFF = 1
-STATE_PATROL = 2  # 包含了巡查(P)、穿梭(T)、返航(R)逻辑
-STATE_DRAWING = 3  # 发现动物悬停画圈
-STATE_RETREAT = 4  # 降落前退避 1.2m
-STATE_LANDING = 5  # 45度斜线下砸
+STATE_PATROL = 2
+STATE_DRAWING = 3
+STATE_RETREAT = 4
+STATE_LANDING = 5
 
 fsm_state = STATE_IDLE
 
-# 视觉系统的状态锁与记忆小本本
+# 视觉与追踪全局变量
 vision_enabled = False
 detected_animals = set()
 draw_start_time = 0
-current_grid_code = "UNKNOWN"  # 记录当前所在的网格，用于战报回传
+current_grid_code = "UNKNOWN"
 
 
-# ================= 回调函数与通信函数 =================
+# ================= 核心遥测通信系统 =================
+def send_udp_telemetry(msg):
+    """通用 UDP 遥测发送中心 (盲发至高级地面站)"""
+    GS_IP = "127.0.0.1"
+    GS_PORT = 8888
+
+    try:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        sock.sendto(msg.encode('utf-8'), (GS_IP, GS_PORT))
+        # 只在终端简单打印，防止日志刷屏
+        rospy.loginfo(f"[Telemetry TX] -> {msg}")
+    except Exception as e:
+        rospy.logerr(f"UDP 遥测发送失败: {e}")
+
+
+# ================= 回调函数 =================
 def state_cb(msg):
     global current_state
     current_state = msg
@@ -40,36 +55,20 @@ def pos_cb(msg):
     current_pos = msg
 
 
-def report_to_ground_station(animal, grid):
-    """把战报用 UDP 发回高级地面站"""
-    GS_IP = "127.0.0.1"  # 默认发往本地 IP
-    GS_PORT = 8888  # 适配你们的高级地面站监听端口
-
-    msg = f"REPORT:{animal}@{grid}"
-    try:
-        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        sock.sendto(msg.encode('utf-8'), (GS_IP, GS_PORT))
-        rospy.loginfo(f"已向高级地面站发送战报: {msg}")
-    except Exception as e:
-        rospy.logerr(f"战报发送失败: {e}")
-
-
 def vision_cb(msg):
     global fsm_state, draw_start_time, detected_animals, vision_enabled, current_grid_code
     animal_name = msg.data
 
-    # 触发悬停的三个硬性条件：1.允许视觉 2.正在巡航 3.第一次遇见
+    # 视觉打断：1.允许视觉 2.正在巡航 3.未记录过
     if vision_enabled and fsm_state == STATE_PATROL and (animal_name not in detected_animals):
-        rospy.logwarn(f"!!! 真实视觉预警：在 {current_grid_code} 发现 {animal_name}，紧急悬停 !!!")
+        rospy.logwarn(f"!!! 视觉预警：在 {current_grid_code} 发现 {animal_name} !!!")
 
         detected_animals.add(animal_name)
-
-        # 瞬间打断状态
         draw_start_time = time.time()
         fsm_state = STATE_DRAWING
 
-        # 呼叫地面站
-        report_to_ground_station(animal_name, current_grid_code)
+        # 向上位机发送报警数据包
+        send_udp_telemetry(f"REPORT:{animal_name}@{current_grid_code}")
 
 
 def get_distance(p1_x, p1_y, p1_z, p2_x, p2_y, p2_z):
@@ -108,7 +107,7 @@ def main_loop():
         rate.sleep()
     rospy.loginfo("飞控已连接！准备接管控制权...")
 
-    # 发送心跳包抢占 OFFBOARD
+    # 抢占 OFFBOARD
     pose = PoseStamped()
     for _ in range(100):
         local_pos_pub.publish(pose)
@@ -156,7 +155,7 @@ def main_loop():
 
             target = mission_wps[wp_index]
             current_task = target.get("task", "P")
-            current_grid_code = target["grid"]  # 实时更新当前网格，供视觉回调使用
+            current_grid_code = target["grid"]
 
             # 【动态变速箱与视觉开关锁】
             if current_task == "P":
@@ -183,8 +182,13 @@ def main_loop():
 
                 real_dist = get_distance(current_pos.pose.position.x, current_pos.pose.position.y, 1.2, target["x"],
                                          target["y"], 1.2)
+
+                # ==== 核心触发点：当无人机到达目标网格上空时 ====
                 if real_dist < TOLERANCE:
                     rospy.loginfo(f"√ 到达 {target['grid']} [标签:{current_task}]")
+
+                    # 向上位机发送到达打卡数据包
+                    send_udp_telemetry(f"ARRIVED:{target['grid']}")
 
                     if current_task == "L":
                         rospy.loginfo(">> [全场最后一点到达！触发退避动作]")
