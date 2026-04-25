@@ -58,7 +58,27 @@ class MainController:
         route_list = self.ui.route_list
         if not route_list or len(route_list) < 2:
             return
-        route_str = "ROUTE:" + ",".join(route_list)
+            
+        # 根据规则生成带有 Tag 的航点字符串
+        tagged_route = []
+        visited = set()
+        
+        for i, wp in enumerate(route_list):
+            if i == len(route_list) - 1:
+                # 最后一个点一定是起点 A9_B1，并且打上 L 标签
+                tagged_route.append(f"{wp}:L")
+            else:
+                # 如果这个网格是返航路径上的
+                if hasattr(self.ui, 'return_start_index') and self.ui.return_start_index is not None and i >= self.ui.return_start_index:
+                     tagged_route.append(f"{wp}:R")
+                else:
+                    if wp not in visited:
+                        tagged_route.append(f"{wp}:P")
+                        visited.add(wp)
+                    else:
+                        tagged_route.append(f"{wp}:T")
+        
+        route_str = "ROUTE:" + ",".join(tagged_route)
         self.comm.send_data(route_str)
         self.ui.set_grid_interaction(False)
 
