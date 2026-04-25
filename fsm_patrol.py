@@ -6,6 +6,7 @@ import time
 from geometry_msgs.msg import PoseStamped
 from mavros_msgs.srv import CommandBool, SetMode
 from mavros_msgs.msg import State
+from std_msgs.msg import String  # 接收视觉节点的动物名字
 
 # ================= 全局变量与状态枚举 =================
 current_state = State()
@@ -14,17 +15,16 @@ current_pos = PoseStamped()
 STATE_IDLE = 0
 STATE_TAKEOFF = 1
 STATE_PATROL = 2  # 包含了巡查(P)、穿梭(T)、返航(R)逻辑
-STATE_DRAWING = 3  # 发现动物画轮廓
+STATE_DRAWING = 3  # 发现动物悬停画圈
 STATE_RETREAT = 4  # 降落前退避 1.2m
 STATE_LANDING = 5  # 45度斜线下砸
 
 fsm_state = STATE_IDLE
 
-# 预设的两只“隐形动物” (比赛时由真实视觉模块更新)
-FAKE_ANIMALS = [
-    {"name": "Tiger", "x": -1.0, "y": 1.0, "detected": False},
-    {"name": "Elephant", "x": -3.0, "y": 2.0, "detected": False}
-]
+# 视觉系统的状态锁与记忆小本本
+vision_enabled = False  # 只有在 P 模式下才设为 True
+detected_animals = set()  # 记录已经画过圈的动物，防重复打断
+draw_start_time = 0
 
 
 # ================= 回调函数 =================
@@ -38,17 +38,41 @@ def pos_cb(msg):
     current_pos = msg
 
 
+# 视觉打断回调函数 (极其敏锐的神经反射)
+def vision_cb(msg):
+    global fsm_state, draw_start_time, detected_animals, vision_enabled
+    animal_name = msg.data
+
+    # 触发悬停的三个硬性条件：
+    # 1. 允许视觉 (当前在:P路段)
+    # 2. 当前处于巡航状态 (没在起飞或降落)
+    # 3. 这个动物是第一次见 (不在小本本里)
+    if vision_enabled and fsm_state == STATE_PATROL and (animal_name not in detected_animals):
+        rospy.logwarn(f"!!! 真实视觉预警：发现 {animal_name}，紧急悬停 !!!")
+
+        # 记入小本本，终生不再理会它
+        detected_animals.add(animal_name)
+
+        # 记录当前时间并瞬间打断状态！
+        draw_start_time = time.time()
+        fsm_state = STATE_DRAWING
+
+
 def get_distance(p1_x, p1_y, p1_z, p2_x, p2_y, p2_z):
     return math.sqrt((p1_x - p2_x) ** 2 + (p1_y - p2_y) ** 2 + (p1_z - p2_z) ** 2)
 
 
 # ================= 核心状态机主循环 =================
 def main_loop():
-    global fsm_state
+    global fsm_state, vision_enabled
     rospy.init_node('fsm_patrol_node', anonymous=True)
 
     rospy.Subscriber("mavros/state", State, state_cb)
     rospy.Subscriber("mavros/local_position/pose", PoseStamped, pos_cb)
+
+    # 订阅视觉节点的话题 (假设你的 YOLO 节点发到这个名字)
+    rospy.Subscriber("/vision/animal_detect", String, vision_cb)
+
     local_pos_pub = rospy.Publisher("mavros/setpoint_position/local", PoseStamped, queue_size=10)
 
     arming_client = rospy.ServiceProxy("mavros/cmd/arming", CommandBool)
@@ -81,7 +105,6 @@ def main_loop():
     # 初始化飞行参数
     wp_index = 0
     TOLERANCE = 0.2
-    draw_start_time = 0
 
     rospy.loginfo("========== 状态机启动 ==========")
 
@@ -123,32 +146,18 @@ def main_loop():
             target = mission_wps[wp_index]
             current_task = target.get("task", "P")
 
-            # 【动态变速箱】
+            # 【动态变速箱与视觉开关锁】
             if current_task == "P":  # 巡查区
                 current_speed = 2.0
-                vision_enabled = True
+                vision_enabled = True  # 允许视觉打断
             elif current_task in ["T", "R", "L"]:  # 穿梭、返航、最后降落点
                 current_speed = 4.0  # 极速狂飙
-                vision_enabled = False  # 视觉屏蔽死锁
+                vision_enabled = False  # 屏蔽视觉，绝不停顿
 
             STEP_DIST = current_speed * dt
 
-            # 【视觉打断机制】
-            if vision_enabled:
-                for animal in FAKE_ANIMALS:
-                    if not animal["detected"]:
-                        # 距离假动物小于 0.3 米触发打断
-                        dist_to_animal = get_distance(current_pos.pose.position.x, current_pos.pose.position.y, 0,
-                                                      animal["x"], animal["y"], 0)
-                        if dist_to_animal < 0.3:
-                            rospy.logwarn(f"!!! 视觉预警：在 {target['grid']} 发现 {animal['name']} !!!")
-                            animal["detected"] = True
-                            draw_start_time = time.time()
-                            fsm_state = STATE_DRAWING  # 瞬间切入画画状态
-                            break
-
             # 【平滑胡萝卜引导法】
-            if fsm_state == STATE_PATROL:
+            if fsm_state == STATE_PATROL:  # 确保没被视觉中断
                 dx = target["x"] - pose.pose.position.x
                 dy = target["y"] - pose.pose.position.y
                 dist = math.sqrt(dx ** 2 + dy ** 2)
@@ -166,12 +175,12 @@ def main_loop():
                 if real_dist < TOLERANCE:
                     rospy.loginfo(f"√ 到达 {target['grid']} [标签:{current_task}]")
 
-                    # 如果刚才到达的这个点，是带着 L 标签的全场最后一个点 (A9B1)
+                    # 如果踩到 L 标签的全场最后一个点 (A9B1)
                     if current_task == "L":
                         rospy.loginfo(">> [全场最后一点到达！触发退避动作]")
                         fsm_state = STATE_RETREAT
                     else:
-                        wp_index += 1  # 否则继续读下一个点
+                        wp_index += 1
 
         # ==========================================
         # 状态 3: 绘制轮廓 (悬停打断)
@@ -185,7 +194,7 @@ def main_loop():
                 fsm_state = STATE_PATROL
 
         # ==========================================
-        # 状态 4: 降落前退避 (几何补正)
+        # 状态 4: 降落前退避 (完美几何逻辑)
         # ==========================================
         elif fsm_state == STATE_RETREAT:
             # 起飞点是 (0,0)。为了满足 45 度降落，向 Y 轴正方向退避 1.2m
@@ -206,8 +215,8 @@ def main_loop():
             real_dist = get_distance(current_pos.pose.position.x, current_pos.pose.position.y, 1.2, target_x, target_y,
                                      target_z)
             if real_dist < TOLERANCE:
-                rospy.loginfo(">> [退避完成！开启 LED 闪烁，执行 45度斜线 LANDING]")
-                # 比赛时在这里通过 GPIO 开灯
+                rospy.loginfo(">> [退避完成！执行 45度斜线 LANDING]")
+                # 赛场上在这里通过 GPIO 控制 LED
                 fsm_state = STATE_LANDING
 
         # ==========================================
