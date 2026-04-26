@@ -1,5 +1,5 @@
 import math
-from PyQt5.QtWidgets import QMainWindow, QWidget, QGridLayout, QPushButton, QVBoxLayout, QHBoxLayout, QLabel, QSizePolicy, QFormLayout, QLineEdit
+from PyQt5.QtWidgets import QMainWindow, QWidget, QGridLayout, QPushButton, QVBoxLayout, QHBoxLayout, QLabel, QSizePolicy, QFormLayout, QLineEdit, QListWidget, QScrollArea
 from PyQt5.QtCore import Qt, QTimer, QPointF
 from PyQt5.QtGui import QFont, QPainter, QPen, QColor, QPolygonF
 
@@ -158,6 +158,8 @@ class GroundStationUI(QMainWindow):
         self.return_start_index = None
         self.cell_size_m = 0.5
         self.plane_grid_id = None
+        self.alarm_cells = set()
+        self.node_indicators = {}
         
         # 保存路由状态，用于自适应刷新
         self.current_step = 0
@@ -254,6 +256,16 @@ class GroundStationUI(QMainWindow):
             border-radius: 8px;
             font-size: 12px;
         """
+        
+        self.style_alarm = """
+            background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                stop:0 #ffebee, stop:1 #f44336);
+            color: #b71c1c;
+            font-weight: bold;
+            border: 3px solid #d32f2f;
+            border-radius: 8px;
+            font-size: 12px;
+        """
 
         for y_idx, row_name in enumerate(reversed(self.rows)):
             lbl = QLabel(row_name)
@@ -300,43 +312,42 @@ class GroundStationUI(QMainWindow):
 
         grid_container.addLayout(grid_layout)
         
-        # 右侧控制面板
+        # 右侧控制面板（可滚动）
         side_panel = QVBoxLayout()
-        side_panel.setSpacing(12)
-        side_panel.setContentsMargins(10, 10, 10, 10)
+        side_panel.setSpacing(8)
+        side_panel.setContentsMargins(8, 8, 8, 8)
         
-        # 状态面板
-        status_panel = QWidget()
-        status_panel.setStyleSheet("""
-            background-color: white;
-            border-radius: 10px;
-            border: 2px solid #e3f2fd;
-        """)
-        status_layout = QVBoxLayout(status_panel)
-        status_layout.setContentsMargins(15, 15, 15, 15)
+        right_container = QWidget()
+        right_container.setLayout(side_panel)
+        
+        scroll_area = QScrollArea()
+        scroll_area.setWidgetResizable(True)
+        scroll_area.setFrameShape(QScrollArea.NoFrame)
+        scroll_area.setWidget(right_container)
         
         # ====== IP & Port 网络配置区 ======
         ip_panel = QWidget()
         ip_panel.setStyleSheet("""
             background-color: white;
-            border-radius: 10px;
-            border: 2px solid #e3f2fd;
+            border-radius: 8px;
+            border: 1px solid #e3f2fd;
         """)
         ip_layout = QFormLayout(ip_panel)
-        ip_layout.setContentsMargins(15, 15, 15, 15)
+        ip_layout.setContentsMargins(10, 10, 10, 10)
         
         self.ip_input = QLineEdit("127.0.0.1")
         self.port_send_input = QLineEdit("8889")
         self.port_recv_input = QLineEdit("8888")
         
-        # add labels
         self.apply_ip_btn = QPushButton("应用网络配置")
+        self.apply_ip_btn.setFixedHeight(34)
         self.apply_ip_btn.setStyleSheet("""
             QPushButton {
                 background-color: #1976d2; 
                 color: white; 
                 border-radius: 4px; 
-                padding: 5px;
+                padding: 4px 8px;
+                font-size: 11px;
             }
             QPushButton:hover { background-color: #1565C0; }
         """)
@@ -347,62 +358,134 @@ class GroundStationUI(QMainWindow):
         ip_layout.addWidget(self.apply_ip_btn)
         
         side_panel.addWidget(ip_panel)
-
-        # 移动 status_lbl 初始化到这里以防止被覆盖或未初始化
-        # =========== StatusBar/Message Panel ===========
-        self.status_lbl = QLabel("通信状态: 待连接...")
-        self.status_lbl.setFont(QFont('Microsoft YaHei UI', 11))
-        self.status_lbl.setStyleSheet("""
-            color: #1976d2;
-            padding: 8px;
-            background-color: #e3f2fd;
-            border-radius: 6px;
+        
+        # ====== 系统状态卡片 ======
+        system_panel = QWidget()
+        system_panel.setStyleSheet("""
+            background-color: white;
+            border-radius: 8px;
+            border: 1px solid #e3f2fd;
         """)
-        # We assume side_panel already exists
-        side_panel.addWidget(self.status_lbl)
-
+        system_layout = QVBoxLayout(system_panel)
+        system_layout.setContentsMargins(10, 10, 10, 10)
+        system_layout.setSpacing(6)
+        
+        system_title = QLabel("系统状态")
+        system_title.setFont(QFont('Microsoft YaHei UI', 12, QFont.Bold))
+        system_title.setStyleSheet("color: #1a73e8;")
+        system_layout.addWidget(system_title)
+        
+        self.status_lbl = QLabel("通信: 待连接...")
+        self.status_lbl.setFont(QFont('Microsoft YaHei UI', 10))
+        self.status_lbl.setStyleSheet("color: #1976d2;")
+        system_layout.addWidget(self.status_lbl)
+        
+        self.mission_status_lbl = QLabel("任务: 待发送航线")
+        self.mission_status_lbl.setFont(QFont('Microsoft YaHei UI', 10))
+        self.mission_status_lbl.setStyleSheet("color: #1b5e20;")
+        system_layout.addWidget(self.mission_status_lbl)
+        
+        node_grid = QGridLayout()
+        node_grid.setHorizontalSpacing(8)
+        node_grid.setVerticalSpacing(4)
+        self._add_node_indicator(node_grid, "视觉", "VISION", 0, 0)
+        self._add_node_indicator(node_grid, "接收", "RECEIVER", 0, 1)
+        self._add_node_indicator(node_grid, "飞控", "FSM", 0, 2)
+        system_layout.addLayout(node_grid)
+        
+        side_panel.addWidget(system_panel)
+        
+        # ====== 任务概览 ======
+        info_panel = QWidget()
+        info_panel.setStyleSheet("""
+            background-color: white;
+            border-radius: 8px;
+            border: 1px solid #e8f5e9;
+        """)
+        info_layout = QVBoxLayout(info_panel)
+        info_layout.setContentsMargins(10, 10, 10, 10)
+        info_layout.setSpacing(4)
+        info_title = QLabel("任务概览")
+        info_title.setFont(QFont('Microsoft YaHei UI', 11, QFont.Bold))
+        info_title.setStyleSheet("color: #2E7D32;")
+        info_layout.addWidget(info_title)
+        
         self.info_label = QLabel("禁飞区数: 0\n航点总数: 0")
-        self.info_label.setFont(QFont('微软雅黑', 11))
+        self.info_label.setFont(QFont('微软雅黑', 10))
         self.info_label.setStyleSheet("color: #2E7D32;")
-        side_panel.addWidget(self.info_label)
-
-        # 动物数量统计标题
-        stat_title = QLabel("动物数量汇总")
-        stat_title.setFont(QFont('Microsoft YaHei UI', 14, QFont.Bold))
-        stat_title.setStyleSheet("""
-            color: #2E7D32;
-            padding: 8px;
-            background-color: #e8f5e9;
-            border-radius: 6px;
-            border: 2px solid #c8e6c9;
+        info_layout.addWidget(self.info_label)
+        side_panel.addWidget(info_panel)
+        
+        # ====== 动物数量统计 ======
+        stat_panel = QWidget()
+        stat_panel.setStyleSheet("""
+            background-color: white;
+            border-radius: 8px;
+            border: 1px solid #c8e6c9;
         """)
-        stat_title.setAlignment(Qt.AlignCenter)
-        side_panel.addWidget(stat_title)
-
-        # 动物数量统计标签
+        stat_layout = QVBoxLayout(stat_panel)
+        stat_layout.setContentsMargins(10, 10, 10, 10)
+        stat_layout.setSpacing(6)
+        stat_title = QLabel("动物数量")
+        stat_title.setFont(QFont('Microsoft YaHei UI', 11, QFont.Bold))
+        stat_title.setStyleSheet("color: #2E7D32;")
+        stat_layout.addWidget(stat_title)
+        
+        stat_grid = QGridLayout()
+        stat_grid.setHorizontalSpacing(10)
+        stat_grid.setVerticalSpacing(4)
         self.stat_labels = {}
-        for name in self.animal_names:
+        for i, name in enumerate(self.animal_names):
             lbl = QLabel(f"{name}: 0")
-            lbl.setFont(QFont('微软雅黑', 11))
-            lbl.setStyleSheet("color: #2E7D32; padding: 4px;")
-            side_panel.addWidget(lbl)
+            lbl.setFont(QFont('微软雅黑', 10))
+            lbl.setStyleSheet("color: #2E7D32;")
+            row = i // 3
+            col = i % 3
+            stat_grid.addWidget(lbl, row, col)
             self.stat_labels[name] = lbl
+        stat_layout.addLayout(stat_grid)
+        side_panel.addWidget(stat_panel)
+        
+        # ====== 报警记录 ======
+        alarm_panel = QWidget()
+        alarm_panel.setStyleSheet("""
+            background-color: white;
+            border-radius: 8px;
+            border: 1px solid #ffcdd2;
+        """)
+        alarm_layout = QVBoxLayout(alarm_panel)
+        alarm_layout.setContentsMargins(10, 10, 10, 10)
+        alarm_layout.setSpacing(6)
+        alarm_title = QLabel("报警记录")
+        alarm_title.setFont(QFont('Microsoft YaHei UI', 11, QFont.Bold))
+        alarm_title.setStyleSheet("color: #c62828;")
+        alarm_layout.addWidget(alarm_title)
+        
+        self.alarm_list = QListWidget()
+        self.alarm_list.setStyleSheet("""
+            QListWidget {
+                background-color: white;
+                border-radius: 6px;
+                border: 1px solid #ffcdd2;
+                padding: 4px;
+                color: #b71c1c;
+                font-size: 10px;
+            }
+        """)
+        self.alarm_list.setMinimumHeight(120)
+        self.alarm_list.setMaximumHeight(140)
+        alarm_layout.addWidget(self.alarm_list)
+        side_panel.addWidget(alarm_panel)
 
-        # 手动/自动规划按钮
+        # ====== 操作按钮 ======
         btn_style_base = """
             QPushButton {
                 color: white;
                 font-weight: bold;
-                border-radius: 8px;
-                font-size: 14px;
-                padding: 10px;
+                border-radius: 6px;
+                font-size: 12px;
+                padding: 6px 8px;
                 font-family: 'Microsoft YaHei UI', sans-serif;
-            }
-            QPushButton:hover {
-                transform: scale(1.05);
-            }
-            QPushButton:pressed {
-                transform: scale(0.95);
             }
             QPushButton:disabled {
                 background-color: #bdbdbd;
@@ -412,7 +495,7 @@ class GroundStationUI(QMainWindow):
 
         self.manual_btn = QPushButton("🎯 手动规划")
         self.manual_btn.setCheckable(True)
-        self.manual_btn.setFixedHeight(45)
+        self.manual_btn.setFixedHeight(38)
         self.manual_btn.setStyleSheet(btn_style_base + """
             QPushButton {
                 background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
@@ -422,61 +505,56 @@ class GroundStationUI(QMainWindow):
                 background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
                     stop:0 #26a69a, stop:1 #00897b);
             }
-            QPushButton:hover {
-                background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
-                    stop:0 #90a4ae, stop:1 #607d8b);
-            }
         """)
         self.manual_btn.toggled.connect(self.set_manual_mode)
         side_panel.addWidget(self.manual_btn)
 
         self.plan_btn = QPushButton("🚁 自动规划")
-        self.plan_btn.setFixedHeight(50)
+        self.plan_btn.setFixedHeight(40)
         self.plan_btn.setStyleSheet(btn_style_base + """
             QPushButton {
                 background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
                     stop:0 #42a5f5, stop:1 #1976d2);
-                font-size: 15px;
-            }
-            QPushButton:hover {
-                background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
-                    stop:0 #64b5f6, stop:1 #2196f3);
             }
         """)
         side_panel.addWidget(self.plan_btn)
 
-        self.send_btn = QPushButton("✈️ 发送/起飞")
-        self.send_btn.setFixedHeight(50)
+        self.send_btn = QPushButton("📤 发送航线")
+        self.send_btn.setFixedHeight(40)
         self.send_btn.setEnabled(False)
         self.send_btn.setStyleSheet(btn_style_base + """
             QPushButton {
                 background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
                     stop:0 #66bb6a, stop:1 #43a047);
-                font-size: 15px;
-            }
-            QPushButton:hover {
-                background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
-                    stop:0 #81c784, stop:1 #4caf50);
             }
         """)
         side_panel.addWidget(self.send_btn)
+        
+        self.takeoff_btn = QPushButton("🛫 授权起飞")
+        self.takeoff_btn.setFixedHeight(38)
+        self.takeoff_btn.setEnabled(False)
+        self.takeoff_btn.setStyleSheet(btn_style_base + """
+            QPushButton {
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+                    stop:0 #ffb74d, stop:1 #fb8c00);
+            }
+        """)
+        side_panel.addWidget(self.takeoff_btn)
 
         self.reset_all_btn = QPushButton("🔄 全局复位")
-        self.reset_all_btn.setFixedHeight(42)
+        self.reset_all_btn.setFixedHeight(38)
         self.reset_all_btn.setStyleSheet(btn_style_base + """
             QPushButton {
                 background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
                     stop:0 #78909c, stop:1 #546e7a);
             }
-            QPushButton:hover {
-                background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
-                    stop:0 #90a4ae, stop:1 #607d8b);
-            }
         """)
         side_panel.addWidget(self.reset_all_btn)
+        
+        side_panel.addStretch(1)
 
         main_layout.addLayout(grid_container, 5)
-        main_layout.addLayout(side_panel, 2)
+        main_layout.addWidget(scroll_area, 2)
 
         self.central_widget = QWidget()
         self.central_widget.setLayout(main_layout)
@@ -585,6 +663,9 @@ class GroundStationUI(QMainWindow):
                 continue
 
             btn.setText(self.grid_data.get(gid, "00000"))
+            if gid in self.alarm_cells:
+                btn.setStyleSheet(self.style_alarm)
+                continue
             if gid in self.detected_cells:
                 btn.setStyleSheet(self.style_done)
                 continue
@@ -621,6 +702,7 @@ class GroundStationUI(QMainWindow):
 
         self.nofly_zones.clear()
         self.detected_cells.clear()
+        self.alarm_cells.clear()
         for gid in self.grid_widgets:
             if gid != self.start_point:
                 self.grid_data[gid] = "00000"
@@ -637,13 +719,76 @@ class GroundStationUI(QMainWindow):
 
         self.plan_btn.setEnabled(True)
         self.send_btn.setEnabled(False)
+        if hasattr(self, "takeoff_btn"):
+            self.takeoff_btn.setEnabled(False)
         self.set_grid_interaction(True)
         self.refresh_grid_styles()
         self.calculate_totals()
         self.update_info_label()
+        if hasattr(self, "alarm_list"):
+            self.alarm_list.clear()
+        if hasattr(self, "mission_status_lbl"):
+            self.update_mission_status("待发送航线")
 
     def update_status_msg(self, msg):
-        self.status_lbl.setText(f"通信状态:\n{msg}")
+        self.status_lbl.setText(f"通信: {msg}")
+    
+    def update_mission_status(self, msg):
+        if hasattr(self, "mission_status_lbl"):
+            self.mission_status_lbl.setText(f"任务: {msg}")
+    
+    def set_takeoff_enabled(self, enabled):
+        if hasattr(self, "takeoff_btn"):
+            self.takeoff_btn.setEnabled(enabled)
+    
+    def append_alarm_record(self, record_text):
+        if hasattr(self, "alarm_list"):
+            self.alarm_list.addItem(record_text)
+            self.alarm_list.scrollToBottom()
+    
+    def update_grid_alarm(self, gid):
+        if gid not in self.grid_widgets:
+            return
+        self.alarm_cells.add(gid)
+        btn = self.grid_widgets[gid]
+        btn.setText(self.grid_data.get(gid, "00000"))
+        btn.setStyleSheet(self.style_alarm)
+    
+    def _add_node_indicator(self, layout, label_text, key, row=None, col=None):
+        row_layout = QHBoxLayout()
+        row_layout.setContentsMargins(0, 0, 0, 0)
+        indicator = QLabel()
+        indicator.setFixedSize(10, 10)
+        indicator.setStyleSheet("""
+            background-color: #bdbdbd;
+            border-radius: 5px;
+            border: 1px solid #9e9e9e;
+        """)
+        label = QLabel(label_text)
+        label.setFont(QFont('Microsoft YaHei UI', 9))
+        row_layout.addWidget(indicator)
+        row_layout.addSpacing(4)
+        row_layout.addWidget(label)
+        row_layout.addStretch(1)
+        container = QWidget()
+        container.setLayout(row_layout)
+        if isinstance(layout, QGridLayout) and row is not None and col is not None:
+            layout.addWidget(container, row, col)
+        else:
+            layout.addWidget(container)
+        self.node_indicators[key] = indicator
+    
+    def set_node_ready(self, key, ready=True):
+        indicator = self.node_indicators.get(key)
+        if not indicator:
+            return
+        color = "#4caf50" if ready else "#bdbdbd"
+        border = "#43a047" if ready else "#9e9e9e"
+        indicator.setStyleSheet(f"""
+            background-color: {color};
+            border-radius: 6px;
+            border: 1px solid {border};
+        """)
 
     def _normalize_animal_code(self, animal_code):
         digits = "".join([ch for ch in animal_code if ch.isdigit()])
@@ -661,7 +806,10 @@ class GroundStationUI(QMainWindow):
             self.grid_data[gid] = normalized
             self.detected_cells.add(gid)
             btn.setText(normalized)
-            btn.setStyleSheet(self.style_done)
+            if gid in self.alarm_cells:
+                btn.setStyleSheet(self.style_alarm)
+            else:
+                btn.setStyleSheet(self.style_done)
             self.calculate_totals()
 
     def update_grid_arrival(self, gid):
@@ -672,7 +820,10 @@ class GroundStationUI(QMainWindow):
         btn = self.grid_widgets[gid]
         self.detected_cells.add(gid)
         btn.setText(self.grid_data.get(gid, "00000"))
-        btn.setStyleSheet(self.style_done)
+        if gid in self.alarm_cells:
+            btn.setStyleSheet(self.style_alarm)
+        else:
+            btn.setStyleSheet(self.style_done)
 
     def update_plane_position(self, grid_id):
         if grid_id not in self.grid_widgets:
