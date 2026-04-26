@@ -17,12 +17,15 @@ class MainController:
     def bind_signals(self):
         self.ui.plan_btn.clicked.connect(self.handle_plan_route)
         self.ui.send_btn.clicked.connect(self.handle_send_route)
+        self.ui.takeoff_btn.clicked.connect(self.handle_takeoff_authorize)
         
         self.ui.apply_ip_btn.clicked.connect(self.handle_apply_ip)
 
         self.comm.data_received.connect(self.handle_drone_data)
         self.comm.arrival_received.connect(self.handle_drone_arrival)
-        self.comm.report_received.connect(self.handle_drone_report)
+        self.comm.report_received.connect(self.handle_alarm_report)
+        self.comm.status_received.connect(self.handle_drone_status)
+        self.comm.reply_received.connect(self.handle_drone_reply)
         self.comm.status_update.connect(self.ui.update_status_msg)
 
     def handle_apply_ip(self):
@@ -48,7 +51,9 @@ class MainController:
         # 3. Re-bind
         self.comm.data_received.connect(self.handle_drone_data)
         self.comm.arrival_received.connect(self.handle_drone_arrival)
-        self.comm.report_received.connect(self.handle_drone_report)
+        self.comm.report_received.connect(self.handle_alarm_report)
+        self.comm.status_received.connect(self.handle_drone_status)
+        self.comm.reply_received.connect(self.handle_drone_reply)
         self.comm.status_update.connect(self.ui.update_status_msg)
         
         # 4. Start again
@@ -127,9 +132,23 @@ class MainController:
         route_str = "ROUTE:" + ",".join(tagged_route)
         self.comm.send_data(route_str)
         self.ui.set_grid_interaction(False)
+        if hasattr(self.ui, "update_mission_status"):
+            self.ui.update_mission_status("等待机载端确认")
+        if hasattr(self.ui, "set_takeoff_enabled"):
+            self.ui.set_takeoff_enabled(False)
 
     def handle_drone_data(self, data):
         try:
+            if data.startswith("STATUS:"):
+                payload = data.split(":", 1)[1].strip()
+                if payload:
+                    self.handle_drone_status(payload)
+                return
+            if data.startswith("REPLY:"):
+                payload = data.split(":", 1)[1].strip()
+                if payload:
+                    self.handle_drone_reply(payload)
+                return
             if data.startswith("ARRIVED:"):
                 grid_id = data.split(":", 1)[1].strip()
                 if grid_id:
@@ -139,17 +158,26 @@ class MainController:
                 payload = data.split(":", 1)[1].strip()
                 if "@" in payload:
                     animal_code, grid_id = payload.split("@", 1)
-                    self.handle_drone_report(grid_id.strip(), animal_code.strip())
+                    self.handle_alarm_report(grid_id.strip(), animal_code.strip())
                 return
             if ":" in data:
                 grid_id, animal_code = data.split(":", 1)
                 grid_id = grid_id.strip()
                 animal_code = animal_code.strip()
-                self.handle_drone_report(grid_id, animal_code)
+                self.handle_legacy_report(grid_id, animal_code)
         except Exception as e:
             print(f"数据解析出错: {data}")
 
-    def handle_drone_report(self, grid_id, animal_code):
+    def handle_alarm_report(self, grid_id, animal_code):
+        self.ui.update_grid_result(grid_id, animal_code)
+        if hasattr(self.ui, "update_grid_alarm"):
+            self.ui.update_grid_alarm(grid_id)
+        if hasattr(self.ui, "append_alarm_record"):
+            self.ui.append_alarm_record(f"{animal_code}@{grid_id}")
+        if hasattr(self.ui, "update_plane_position"):
+            self.ui.update_plane_position(grid_id)
+
+    def handle_legacy_report(self, grid_id, animal_code):
         self.ui.update_grid_result(grid_id, animal_code)
         if hasattr(self.ui, "update_plane_position"):
             self.ui.update_plane_position(grid_id)
@@ -160,6 +188,40 @@ class MainController:
             self.ui.update_grid_arrival(grid_id)
         if hasattr(self.ui, "update_plane_position"):
             self.ui.update_plane_position(grid_id)
+
+    def handle_drone_status(self, status):
+        status_key = status.strip().upper()
+        mapping = {
+            "VISION_READY": "VISION",
+            "RECEIVER_READY": "RECEIVER",
+            "FSM_READY": "FSM"
+        }
+        node_key = mapping.get(status_key)
+        if node_key and hasattr(self.ui, "set_node_ready"):
+            self.ui.set_node_ready(node_key, True)
+
+    def handle_drone_reply(self, reply):
+        reply_key = reply.strip().upper()
+        if reply_key == "MISSION_SAVED":
+            if hasattr(self.ui, "update_mission_status"):
+                self.ui.update_mission_status("航线已被机载端保存")
+            if hasattr(self.ui, "set_takeoff_enabled"):
+                self.ui.set_takeoff_enabled(False)
+        elif reply_key == "MISSION_LOADED":
+            if hasattr(self.ui, "update_mission_status"):
+                self.ui.update_mission_status("状态机已加载航线，准许起飞")
+            if hasattr(self.ui, "set_takeoff_enabled"):
+                self.ui.set_takeoff_enabled(True)
+        else:
+            if hasattr(self.ui, "update_mission_status"):
+                self.ui.update_mission_status(f"未知回复: {reply}")
+
+    def handle_takeoff_authorize(self):
+        self.comm.send_data("CMD:TAKEOFF")
+        if hasattr(self.ui, "set_takeoff_enabled"):
+            self.ui.set_takeoff_enabled(False)
+        if hasattr(self.ui, "update_mission_status"):
+            self.ui.update_mission_status("已发送起飞授权")
 
 if __name__ == '__main__':
     app = QApplication(sys.argv)

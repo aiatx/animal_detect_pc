@@ -198,7 +198,7 @@ def main_loop():
             current_task = target.get("task", "P")
             current_grid_code = target["grid"]
 
-            speed = 4.0 if current_task in ["T", "R", "L"] else 2.0
+            speed = 2.0 if current_task in ["T", "R", "L"] else 2.0
             vision_enabled = False
 
             step = speed * dt

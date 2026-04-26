@@ -10,6 +10,8 @@ class UDPComm(QThread):
     status_update = pyqtSignal(str)
     arrival_received = pyqtSignal(str)
     report_received = pyqtSignal(str, str)
+    status_received = pyqtSignal(str)
+    reply_received = pyqtSignal(str)
 
     def __init__(self, local_port=8888, drone_ip="192.168.1.100", drone_port=8889):
         super().__init__()
@@ -41,7 +43,19 @@ class UDPComm(QThread):
                 data, addr = self.sock.recvfrom(1024)
                 message = data.decode('utf-8').strip()
                 if message:
-                    if message.startswith("ARRIVED:"):
+                    if message.startswith("STATUS:"):
+                        payload = message.split(":", 1)[1].strip()
+                        if payload:
+                            self.status_received.emit(payload)
+                        else:
+                            self.data_received.emit(message)
+                    elif message.startswith("REPLY:"):
+                        payload = message.split(":", 1)[1].strip()
+                        if payload:
+                            self.reply_received.emit(payload)
+                        else:
+                            self.data_received.emit(message)
+                    elif message.startswith("ARRIVED:"):
                         grid_id = message.split(":", 1)[1].strip()
                         if grid_id:
                             self.arrival_received.emit(grid_id)
