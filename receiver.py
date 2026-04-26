@@ -71,8 +71,9 @@ def start_udp_server():
     # 1. 初始化 ROS 节点
     rospy.init_node('receiver_node', anonymous=True)
 
-    # 2. 注册起飞指令广播大喇叭
+    # 2. 注册广播大喇叭
     takeoff_pub = rospy.Publisher('/fsm/takeoff_cmd', Bool, queue_size=1)
+    pause_pub = rospy.Publisher('/fsm/pause_cmd', Bool, queue_size=1) # <-- 【新增】：紧急悬停大喇叭
 
     UDP_IP = "0.0.0.0"
     UDP_PORT = 8889
@@ -92,12 +93,17 @@ def start_udp_server():
             data, addr = sock.recvfrom(4096)
             raw_str = data.decode('utf-8').strip()
 
-            # 【握手协议核心 3】：权限分发 (收到起飞指令)
+            # 【权限分发】：收到起飞指令
             if raw_str == "CMD:TAKEOFF":
                 rospy.logwarn(">>> 收到地面站【起飞】授权指令！立刻广播给 FSM！ <<<")
                 takeoff_pub.publish(True)
 
-            # 处理航线数据
+            # 【权限分发】：收到紧急悬停指令 <-- 【新增】
+            elif raw_str == "CMD:PAUSE":
+                rospy.logerr("!!! 收到地面站【紧急悬停】指令！立刻广播给 FSM 刹车！ !!!")
+                pause_pub.publish(True)
+
+            # 【处理航线数据】
             elif raw_str.startswith("ROUTE:"):
                 rospy.loginfo(f"收到地面站 {addr} 传来的路径包，正在疯狂解码...")
                 parse_and_save(raw_str)

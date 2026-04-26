@@ -8,13 +8,13 @@ import os  # <-- 新增：用于检查文件是否存在
 from geometry_msgs.msg import PoseStamped
 from mavros_msgs.srv import CommandBool, SetMode
 from mavros_msgs.msg import State
-from std_msgs.msg import String, Bool  # <-- 新增：Bool 用于接收起飞指令
+from std_msgs.msg import String, Bool  # <-- Bool 用于接收起飞和刹车指令
 
 # ================= 全局变量与状态枚举 =================
 current_state = State()
 current_pos = PoseStamped()
 
-# 【新增】前置等待状态
+# 【新增】前置等待状态与紧急状态
 STATE_WAIT_MISSION = -2
 STATE_WAIT_TAKEOFF = -1
 
@@ -25,6 +25,7 @@ STATE_RETREAT = 3
 STATE_LANDING = 4
 STATE_HOVER_CHECK = 5
 STATE_DRIFT_ALIGN = 6
+STATE_PAUSE = 99  # <-- 【新增】紧急悬停死锁状态
 
 # 初始状态设为等待航线
 fsm_state = STATE_WAIT_MISSION
@@ -40,8 +41,9 @@ drift_target_x = 0.0
 drift_target_y = 0.0
 drift_start_time = 0
 
-# 起飞授权锁
+# 起飞授权锁与紧急刹车锁
 takeoff_cmd_received = False
+lock_x, lock_y, lock_z = 0.0, 0.0, 0.0  # 用于保存紧急刹车时的空间快照
 
 
 # ================= 核心遥测通信系统 =================
@@ -72,6 +74,25 @@ def takeoff_cb(msg):
     global takeoff_cmd_received
     if msg.data:
         takeoff_cmd_received = True
+
+
+def pause_cb(msg):
+    """【新增】接收来自 receiver 的紧急刹车指令"""
+    global fsm_state, lock_x, lock_y, lock_z, vision_enabled
+    # 只有在非暂停状态下收到 True 才执行刹车，防止重复触发
+    if msg.data and fsm_state != STATE_PAUSE:
+        rospy.logerr("!!! 触发紧急刹车！立刻拍下空间坐标快照 !!!")
+        # 拍下坐标快照 (死死钉在这个位置)
+        lock_x = current_pos.pose.position.x
+        lock_y = current_pos.pose.position.y
+        lock_z = current_pos.pose.position.z
+
+        # 强行切断视觉神经，防止此时动物乱入改变状态
+        vision_enabled = False
+
+        # 强行切入 99 号死锁状态
+        fsm_state = STATE_PAUSE
+        send_udp_telemetry("STATUS:HOVERING")
 
 
 def vision_cb(msg):
@@ -111,15 +132,16 @@ def get_distance(p1_x, p1_y, p1_z, p2_x, p2_y, p2_z):
 # ================= 主循环 =================
 def main_loop():
     global fsm_state, vision_enabled, current_grid_code, hover_start_time
-    global takeoff_cmd_received
+    global takeoff_cmd_received, lock_x, lock_y, lock_z
     rospy.init_node('fsm_patrol_node', anonymous=True)
 
     rospy.Subscriber("mavros/state", State, state_cb)
     rospy.Subscriber("mavros/local_position/pose", PoseStamped, pos_cb)
     rospy.Subscriber("/vision/animal_detect", String, vision_cb)
 
-    # 【新增】：订阅起飞指令
     rospy.Subscriber("/fsm/takeoff_cmd", Bool, takeoff_cb)
+    # 【新增】订阅紧急悬停话题
+    rospy.Subscriber("/fsm/pause_cmd", Bool, pause_cb)
 
     local_pos_pub = rospy.Publisher("mavros/setpoint_position/local", PoseStamped, queue_size=10)
 
@@ -129,10 +151,8 @@ def main_loop():
     rate = rospy.Rate(20.0)
     dt = 1.0 / 20.0
 
-    # 【握手协议核心 1】：报告 FSM 大脑已就绪
     send_udp_telemetry("STATUS:FSM_READY")
 
-    # 注意：此处删除了原本直接 read json 的 try-except，移入到了状态机内部
     mission_wps = []
 
     rospy.loginfo("等待飞控连接...")
@@ -152,24 +172,29 @@ def main_loop():
 
     while not rospy.is_shutdown():
 
-        # -2. 【新增】等待航线文件
-        if fsm_state == STATE_WAIT_MISSION:
+        # 99. 【新增】紧急悬停死锁
+        if fsm_state == STATE_PAUSE:
+            pose.pose.position.x = lock_x
+            pose.pose.position.y = lock_y
+            pose.pose.position.z = lock_z
+            rospy.loginfo_throttle(2.0, "[紧急悬停] 坐标已死锁！请检查飞机状态，需手动重启节点以恢复。")
+
+        # -2. 等待航线文件
+        elif fsm_state == STATE_WAIT_MISSION:
             if os.path.exists("flight_mission.json"):
                 try:
                     with open("flight_mission.json", "r") as f:
                         mission_wps = json.load(f)
                     rospy.loginfo(f"√ 成功加载航点文件！共包含 {len(mission_wps)} 个航点。")
 
-                    # 【握手协议核心 2】：告诉地面站已加载完毕
                     send_udp_telemetry("REPLY:MISSION_LOADED")
                     fsm_state = STATE_WAIT_TAKEOFF
                 except Exception as e:
                     rospy.logerr_throttle(2.0, f"读取 JSON 失败，可能文件写入中... 错误: {e}")
             else:
-                # 2 秒打印一次，防止刷屏
                 rospy.loginfo_throttle(2.0, "[待机中] 死等 flight_mission.json 诞生...")
 
-        # -1. 【新增】等待起飞授权
+        # -1. 等待起飞授权
         elif fsm_state == STATE_WAIT_TAKEOFF:
             rospy.loginfo_throttle(2.0, "[待命] 航线已装载，等待地面站下发【起飞指令】...")
             if takeoff_cmd_received:
@@ -229,14 +254,13 @@ def main_loop():
             target = mission_wps[wp_index]
             pose.pose.position.x, pose.pose.position.y = target["x"], target["y"]
 
-            # 如果 0.8s 内没有任何“新动物”触发 vision_cb 切走状态，说明这格搜干净了
             if time.time() - hover_start_time > 0.8:
                 rospy.loginfo(f"格子 {target['grid']} 扫描完毕，去下一处。")
                 vision_enabled = False
                 wp_index += 1
                 fsm_state = STATE_PATROL
 
-        # 6. 平滑对齐 (展示完不直接走，而是回中心复检)
+        # 6. 平滑对齐
         elif fsm_state == STATE_DRIFT_ALIGN:
             pose.pose.position.x, pose.pose.position.y = drift_target_x, drift_target_y
             if time.time() - drift_start_time > 3.0:
