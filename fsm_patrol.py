@@ -4,14 +4,19 @@ import math
 import json
 import time
 import socket
+import os  # <-- 新增：用于检查文件是否存在
 from geometry_msgs.msg import PoseStamped
 from mavros_msgs.srv import CommandBool, SetMode
 from mavros_msgs.msg import State
-from std_msgs.msg import String
+from std_msgs.msg import String, Bool  # <-- 新增：Bool 用于接收起飞指令
 
 # ================= 全局变量与状态枚举 =================
 current_state = State()
 current_pos = PoseStamped()
+
+# 【新增】前置等待状态
+STATE_WAIT_MISSION = -2
+STATE_WAIT_TAKEOFF = -1
 
 STATE_IDLE = 0
 STATE_TAKEOFF = 1
@@ -21,7 +26,8 @@ STATE_LANDING = 4
 STATE_HOVER_CHECK = 5
 STATE_DRIFT_ALIGN = 6
 
-fsm_state = STATE_IDLE
+# 初始状态设为等待航线
+fsm_state = STATE_WAIT_MISSION
 
 # 视觉与追踪全局变量
 vision_enabled = False
@@ -33,6 +39,9 @@ hover_start_time = 0
 drift_target_x = 0.0
 drift_target_y = 0.0
 drift_start_time = 0
+
+# 起飞授权锁
+takeoff_cmd_received = False
 
 
 # ================= 核心遥测通信系统 =================
@@ -58,12 +67,17 @@ def pos_cb(msg):
     current_pos = msg
 
 
+def takeoff_cb(msg):
+    """接收来自 receiver 节点的起飞授权"""
+    global takeoff_cmd_received
+    if msg.data:
+        takeoff_cmd_received = True
+
+
 def vision_cb(msg):
     global fsm_state, detected_animals, current_grid_code, vision_enabled
     global drift_target_x, drift_target_y, drift_start_time
 
-    # 核心加固：只有在检测状态下才响应。因为 detected_animals 是 set，
-    # 已经识别过的动物会自动被跳过，从而实现“寻找下一个”
     if vision_enabled and fsm_state == STATE_HOVER_CHECK:
         try:
             parts = msg.data.split(':')
@@ -97,11 +111,16 @@ def get_distance(p1_x, p1_y, p1_z, p2_x, p2_y, p2_z):
 # ================= 主循环 =================
 def main_loop():
     global fsm_state, vision_enabled, current_grid_code, hover_start_time
+    global takeoff_cmd_received
     rospy.init_node('fsm_patrol_node', anonymous=True)
 
     rospy.Subscriber("mavros/state", State, state_cb)
     rospy.Subscriber("mavros/local_position/pose", PoseStamped, pos_cb)
     rospy.Subscriber("/vision/animal_detect", String, vision_cb)
+
+    # 【新增】：订阅起飞指令
+    rospy.Subscriber("/fsm/takeoff_cmd", Bool, takeoff_cb)
+
     local_pos_pub = rospy.Publisher("mavros/setpoint_position/local", PoseStamped, queue_size=10)
 
     arming_client = rospy.ServiceProxy("mavros/cmd/arming", CommandBool)
@@ -110,15 +129,16 @@ def main_loop():
     rate = rospy.Rate(20.0)
     dt = 1.0 / 20.0
 
-    try:
-        with open("flight_mission.json", "r") as f:
-            mission_wps = json.load(f)
-    except:
-        rospy.logerr("缺少航点文件！")
-        return
+    # 【握手协议核心 1】：报告 FSM 大脑已就绪
+    send_udp_telemetry("STATUS:FSM_READY")
 
+    # 注意：此处删除了原本直接 read json 的 try-except，移入到了状态机内部
+    mission_wps = []
+
+    rospy.loginfo("等待飞控连接...")
     while not rospy.is_shutdown() and not current_state.connected:
         rate.sleep()
+    rospy.loginfo("飞控已连接！建立心跳包...")
 
     pose = PoseStamped()
     for _ in range(100):
@@ -128,9 +148,36 @@ def main_loop():
     wp_index = 0
     TOLERANCE = 0.15
 
+    rospy.loginfo("========== 状态机心跳启动 ==========")
+
     while not rospy.is_shutdown():
+
+        # -2. 【新增】等待航线文件
+        if fsm_state == STATE_WAIT_MISSION:
+            if os.path.exists("flight_mission.json"):
+                try:
+                    with open("flight_mission.json", "r") as f:
+                        mission_wps = json.load(f)
+                    rospy.loginfo(f"√ 成功加载航点文件！共包含 {len(mission_wps)} 个航点。")
+
+                    # 【握手协议核心 2】：告诉地面站已加载完毕
+                    send_udp_telemetry("REPLY:MISSION_LOADED")
+                    fsm_state = STATE_WAIT_TAKEOFF
+                except Exception as e:
+                    rospy.logerr_throttle(2.0, f"读取 JSON 失败，可能文件写入中... 错误: {e}")
+            else:
+                # 2 秒打印一次，防止刷屏
+                rospy.loginfo_throttle(2.0, "[待机中] 死等 flight_mission.json 诞生...")
+
+        # -1. 【新增】等待起飞授权
+        elif fsm_state == STATE_WAIT_TAKEOFF:
+            rospy.loginfo_throttle(2.0, "[待命] 航线已装载，等待地面站下发【起飞指令】...")
+            if takeoff_cmd_received:
+                rospy.logwarn(">>> 收到起飞指令，进入解锁起飞序列！ <<<")
+                fsm_state = STATE_IDLE
+
         # 0. 待机与解锁
-        if fsm_state == STATE_IDLE:
+        elif fsm_state == STATE_IDLE:
             if current_state.mode != "OFFBOARD":
                 set_mode_client(custom_mode="OFFBOARD")
             elif not current_state.armed:
@@ -194,15 +241,16 @@ def main_loop():
             pose.pose.position.x, pose.pose.position.y = drift_target_x, drift_target_y
             if time.time() - drift_start_time > 3.0:
                 rospy.loginfo(">> 展示完毕，回中心检测是否有遗漏目标...")
-                # 【修改点】：不加 wp_index，而是重置计时并回检测状态
                 hover_start_time = time.time()
                 fsm_state = STATE_HOVER_CHECK
 
-        # 3. 4. 退避与降落逻辑保持不变...
+        # 3. 退避
         elif fsm_state == STATE_RETREAT:
             pose.pose.position.x, pose.pose.position.y = 0.0, 1.2
             if get_distance(current_pos.pose.position.x, current_pos.pose.position.y, 1.2, 0, 1.2, 1.2) < TOLERANCE:
                 fsm_state = STATE_LANDING
+
+        # 4. 降落
         elif fsm_state == STATE_LANDING:
             pose.pose.position.x, pose.pose.position.y, pose.pose.position.z = 0, 0, 0
             if current_pos.pose.position.z < 0.1:
@@ -214,4 +262,7 @@ def main_loop():
 
 
 if __name__ == '__main__':
-    main_loop()
+    try:
+        main_loop()
+    except rospy.ROSInterruptException:
+        pass

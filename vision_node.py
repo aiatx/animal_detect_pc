@@ -2,8 +2,24 @@
 import rospy
 import numpy as np
 import pyrealsense2 as rs
+import socket  # <-- 新增：用于 UDP 通信
 from std_msgs.msg import String
 from ultralytics import YOLO
+
+# ================= 核心遥测通信系统 =================
+GS_IP = "127.0.0.1"
+GS_PORT = 8888
+
+
+def send_udp_telemetry(msg):
+    """向上位机（高级地面站）回传状态数据"""
+    try:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        sock.sendto(msg.encode('utf-8'), (GS_IP, GS_PORT))
+        # 视觉节点平时不发 UDP（发的是 ROS），只在初始化时发状态，所以打印出来没关系
+        rospy.loginfo(f"[UDP TX] -> {msg}")
+    except Exception as e:
+        rospy.logerr(f"UDP 遥测发送失败: {e}")
 
 
 def start_vision_node():
@@ -27,6 +43,10 @@ def start_vision_node():
     try:
         pipeline.start(config)
         rospy.loginfo("相机启动成功！图像渲染已关闭，算力 100% 倾斜至推理引擎。")
+
+        # 【握手协议核心】：通知地面站视觉节点已彻底就绪，随时可以打猎！
+        send_udp_telemetry("STATUS:VISION_READY")
+
     except Exception as e:
         rospy.logerr(f"RealSense 启动失败，请检查连线！错误: {e}")
         return
@@ -55,8 +75,7 @@ def start_vision_node():
             # 直接转成 NumPy 数组，零拷贝开销
             frame = np.asanyarray(color_frame.get_data())
 
-            # ================= 4. TensorRT 推理 (低门槛高召回) =================
-            # 置信度降至 0.4，防止复杂光线下的漏检
+            # ================= 4. TensorRT 推理 =================
             results = model.predict(frame, conf=0.4, verbose=False)
 
             for r in results:
