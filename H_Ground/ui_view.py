@@ -160,6 +160,9 @@ class GroundStationUI(QMainWindow):
         self.plane_grid_id = None
         self.alarm_cells = set()
         self.node_indicators = {}
+        self.emergency_active = False
+        self._normal_mission_color = "#1b5e20"
+        self._alert_mission_color = "#b71c1c"
         
         # 保存路由状态，用于自适应刷新
         self.current_step = 0
@@ -382,7 +385,7 @@ class GroundStationUI(QMainWindow):
         
         self.mission_status_lbl = QLabel("任务: 待发送航线")
         self.mission_status_lbl.setFont(QFont('Microsoft YaHei UI', 10))
-        self.mission_status_lbl.setStyleSheet("color: #1b5e20;")
+        self.mission_status_lbl.setStyleSheet(f"color: {self._normal_mission_color};")
         system_layout.addWidget(self.mission_status_lbl)
         
         node_grid = QGridLayout()
@@ -541,6 +544,16 @@ class GroundStationUI(QMainWindow):
         """)
         side_panel.addWidget(self.takeoff_btn)
 
+        self.pause_btn = QPushButton("🛑 紧急刹车")
+        self.pause_btn.setFixedHeight(44)
+        self.pause_btn.setStyleSheet(btn_style_base + """
+            QPushButton {
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+                    stop:0 #ef5350, stop:1 #c62828);
+            }
+        """)
+        side_panel.addWidget(self.pause_btn)
+
         self.reset_all_btn = QPushButton("🔄 全局复位")
         self.reset_all_btn.setFixedHeight(38)
         self.reset_all_btn.setStyleSheet(btn_style_base + """
@@ -557,10 +570,14 @@ class GroundStationUI(QMainWindow):
         main_layout.addWidget(scroll_area, 2)
 
         self.central_widget = QWidget()
+        self.central_widget.setObjectName("central_root")
         self.central_widget.setLayout(main_layout)
         self.setCentralWidget(self.central_widget)
 
         self.overlay = PathRenderer(self.central_widget)
+        self._normal_border_style = "QWidget#central_root { border: none; }"
+        self._emergency_border_style = "QWidget#central_root { border: 4px solid #d32f2f; }"
+        self.central_widget.setStyleSheet(self._normal_border_style)
 
         self.reset_all_btn.clicked.connect(self.reset_all)
 
@@ -729,6 +746,7 @@ class GroundStationUI(QMainWindow):
             self.alarm_list.clear()
         if hasattr(self, "mission_status_lbl"):
             self.update_mission_status("待发送航线")
+        self.set_emergency_alert(False)
 
     def update_status_msg(self, msg):
         self.status_lbl.setText(f"通信: {msg}")
@@ -739,7 +757,16 @@ class GroundStationUI(QMainWindow):
     
     def set_takeoff_enabled(self, enabled):
         if hasattr(self, "takeoff_btn"):
-            self.takeoff_btn.setEnabled(enabled)
+            self.takeoff_btn.setEnabled(enabled and not self.emergency_active)
+
+    def set_emergency_alert(self, active):
+        self.emergency_active = bool(active)
+        if hasattr(self, "central_widget"):
+            style = self._emergency_border_style if self.emergency_active else self._normal_border_style
+            self.central_widget.setStyleSheet(style)
+        if hasattr(self, "mission_status_lbl"):
+            color = self._alert_mission_color if self.emergency_active else self._normal_mission_color
+            self.mission_status_lbl.setStyleSheet(f"color: {color};")
     
     def append_alarm_record(self, record_text):
         if hasattr(self, "alarm_list"):

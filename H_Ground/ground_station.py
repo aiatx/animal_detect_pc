@@ -18,6 +18,8 @@ class MainController:
         self.ui.plan_btn.clicked.connect(self.handle_plan_route)
         self.ui.send_btn.clicked.connect(self.handle_send_route)
         self.ui.takeoff_btn.clicked.connect(self.handle_takeoff_authorize)
+        if hasattr(self.ui, "pause_btn"):
+            self.ui.pause_btn.clicked.connect(self.handle_emergency_pause)
         
         self.ui.apply_ip_btn.clicked.connect(self.handle_apply_ip)
 
@@ -196,6 +198,15 @@ class MainController:
             "RECEIVER_READY": "RECEIVER",
             "FSM_READY": "FSM"
         }
+        if status_key == "HOVERING":
+            if hasattr(self.ui, "set_emergency_alert"):
+                self.ui.set_emergency_alert(True)
+            if hasattr(self.ui, "update_mission_status"):
+                self.ui.update_mission_status("已紧急刹车，坐标锁定")
+            if hasattr(self.ui, "set_takeoff_enabled"):
+                self.ui.set_takeoff_enabled(False)
+            return
+
         node_key = mapping.get(status_key)
         if node_key and hasattr(self.ui, "set_node_ready"):
             self.ui.set_node_ready(node_key, True)
@@ -204,12 +215,12 @@ class MainController:
         reply_key = reply.strip().upper()
         if reply_key == "MISSION_SAVED":
             if hasattr(self.ui, "update_mission_status"):
-                self.ui.update_mission_status("航线已被机载端保存")
+                self.ui.update_mission_status("无人机已接收并保存航线")
             if hasattr(self.ui, "set_takeoff_enabled"):
                 self.ui.set_takeoff_enabled(False)
         elif reply_key == "MISSION_LOADED":
             if hasattr(self.ui, "update_mission_status"):
-                self.ui.update_mission_status("状态机已加载航线，准许起飞")
+                self.ui.update_mission_status("无人机状态机已成功加载航线，准许起飞")
             if hasattr(self.ui, "set_takeoff_enabled"):
                 self.ui.set_takeoff_enabled(True)
         else:
@@ -222,6 +233,11 @@ class MainController:
             self.ui.set_takeoff_enabled(False)
         if hasattr(self.ui, "update_mission_status"):
             self.ui.update_mission_status("已发送起飞授权")
+
+    def handle_emergency_pause(self):
+        self.comm.send_data("CMD:PAUSE")
+        if hasattr(self.ui, "update_mission_status"):
+            self.ui.update_mission_status("已发送紧急刹车指令")
 
 if __name__ == '__main__':
     app = QApplication(sys.argv)
