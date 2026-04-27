@@ -1,35 +1,27 @@
 #!/bin/bash
 
-echo "🚀 [1/4] 开启串口权限 (可能需要输入密码)..."
+echo "🚀 准备召唤多终端分布式控制台..."
+
+# 1. 赋予串口权限 (在当前主终端运行即可)
 sudo chmod 777 /dev/ttyTHS0
 
-# 启动 MAVROS (放入后台)
-echo "🚀 [2/4] 启动 MAVROS..."
-roslaunch mavros px4.launch &
-sleep 5  # 等待飞控心跳建立
+# 2. 召唤终端 A：MAVROS 飞控心跳
+gnome-terminal --title="MAVROS_飞控" -- bash -c "roslaunch mavros px4.launch; exec bash"
+sleep 4
 
-# 启动激光雷达和 LIO SLAM
-echo "🚀 [3/4] 启动 Livox 雷达与 Faster-LIO..."
-roslaunch livox_ros_driver2 msg_MID360.launch &
-sleep 3
-roslaunch faster_lio rflysim.launch &
-sleep 5  # 等待点云地图初始化
+# 3. 召唤终端 B：激光雷达与 SLAM (这两个可以放一起，或者再拆开)
+gnome-terminal --title="LIO_SLAM" -- bash -c "roslaunch livox_ros_driver2 msg_MID360.launch & sleep 3; roslaunch faster_lio rflysim.launch; exec bash"
+sleep 4
 
-# 启动我们自己手写的 Python 核心节点
-echo "🚀 [4/4] 启动高层逻辑大脑 (Receiver, Vision, FSM)..."
-python3 receiver.py &
+# 4. 召唤终端 C：地面站通信接收大爷
+gnome-terminal --title="UDP_Receiver" -- bash -c "python3 receiver.py; exec bash"
 sleep 2
-python3 vision_node.py &
-sleep 5
-python3 fsm_patrol.py &
 
-echo "=================================================="
-echo "✅ 所有系统均已上线！飞机已准备好接受地面站指令。"
-echo "🛑 退出程序：请直接按 Ctrl + C，系统将自动清理所有节点。"
-echo "=================================================="
+# 5. 召唤终端 D：视觉大脑 (占用算力最高，单独一个窗口盯着)
+gnome-terminal --title="YOLO_Vision" -- bash -c "python3 vision_node.py; exec bash"
+sleep 4
 
-# 【灵魂代码】捕获 Ctrl+C (SIGINT)，一键杀掉本脚本启动的所有后台子进程
-trap "echo '收到停止指令，正在全军撤退...'; kill 0" SIGINT
+# 6. 召唤终端 E：飞控状态机主逻辑
+gnome-terminal --title="FSM_大脑" -- bash -c "python3 fsm_patrol.py; exec bash"
 
-# 挂起主线程，死等后台任务
-wait
+echo "✅ 所有终端均已就绪！请在各自的窗口中查看运行日志。"
