@@ -4,6 +4,7 @@ import numpy as np
 import pyrealsense2 as rs
 import socket  # <-- 新增：用于 UDP 通信
 from std_msgs.msg import String
+from std_msgs.msg import Bool  # <-- 【本次新增】：加入 Bool 类型用于查岗话题
 from ultralytics import YOLO
 
 # ================= 核心遥测通信系统 =================
@@ -16,10 +17,19 @@ def send_udp_telemetry(msg):
     try:
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         sock.sendto(msg.encode('utf-8'), (GS_IP, GS_PORT))
-        # 视觉节点平时不发 UDP（发的是 ROS），只在初始化时发状态，所以打印出来没关系
-        rospy.loginfo(f"[UDP TX] -> {msg}")
+
+        # 【本次修改】：过滤掉频繁的心跳包打印，防止终端疯狂刷屏
+        if not msg.startswith("STATUS:"):
+            rospy.loginfo(f"[UDP TX] -> {msg}")
+
     except Exception as e:
         rospy.logerr(f"UDP 遥测发送失败: {e}")
+
+
+# 【本次新增】：响应大喇叭查岗的专属回调函数
+def ping_cb(msg):
+    # 只要听到 receiver 吹哨，立刻向地面站补发一次自己的存活证明
+    send_udp_telemetry("STATUS:VISION_READY")
 
 
 def start_vision_node():
@@ -27,6 +37,9 @@ def start_vision_node():
 
     # 建立与 FSM 通信的专属神经通道
     vision_pub = rospy.Publisher('/vision/animal_detect', String, queue_size=1)
+
+    # 【本次新增】：挂载一只“耳朵”，专门监听全局查岗广播
+    rospy.Subscriber('/sys/ping', Bool, ping_cb)
 
     # ================= 1. 加载 TensorRT 引擎 =================
     rospy.loginfo("正在将 .engine 载入 Jetson 的 GPU...")

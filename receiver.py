@@ -14,7 +14,11 @@ def send_udp_telemetry(msg):
     try:
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         sock.sendto(msg.encode('utf-8'), (GS_IP, GS_PORT))
-        rospy.loginfo(f"[UDP TX] -> {msg}")
+
+        # 【本次修改】：过滤掉频繁的心跳包打印，防止终端疯狂刷屏，其他的依然原样打印
+        if not msg.startswith("STATUS:"):
+            rospy.loginfo(f"[UDP TX] -> {msg}")
+
     except Exception as e:
         rospy.logerr(f"UDP 遥测发送失败: {e}")
 
@@ -73,7 +77,10 @@ def start_udp_server():
 
     # 2. 注册广播大喇叭
     takeoff_pub = rospy.Publisher('/fsm/takeoff_cmd', Bool, queue_size=1)
-    pause_pub = rospy.Publisher('/fsm/pause_cmd', Bool, queue_size=1) # <-- 【新增】：紧急悬停大喇叭
+    pause_pub = rospy.Publisher('/fsm/pause_cmd', Bool, queue_size=1)  # <-- 【新增】：紧急悬停大喇叭
+
+    # 【本次新增】：全系统广播大喇叭，专门用来吹哨查岗
+    ping_pub = rospy.Publisher('/sys/ping', Bool, queue_size=1)
 
     UDP_IP = "0.0.0.0"
     UDP_PORT = 8889
@@ -93,8 +100,13 @@ def start_udp_server():
             data, addr = sock.recvfrom(4096)
             raw_str = data.decode('utf-8').strip()
 
+            # 【本次新增】：处理地面站的心跳查岗请求
+            if raw_str == "CMD:PING":
+                send_udp_telemetry("STATUS:RECEIVER_READY")  # 大爷自己先报到
+                ping_pub.publish(True)  # 吹哨让 FSM 和 Vision 也赶紧报到
+
             # 【权限分发】：收到起飞指令
-            if raw_str == "CMD:TAKEOFF":
+            elif raw_str == "CMD:TAKEOFF":
                 rospy.logwarn(">>> 收到地面站【起飞】授权指令！立刻广播给 FSM！ <<<")
                 takeoff_pub.publish(True)
 

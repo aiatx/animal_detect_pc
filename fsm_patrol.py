@@ -53,7 +53,11 @@ def send_udp_telemetry(msg):
     try:
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         sock.sendto(msg.encode('utf-8'), (GS_IP, GS_PORT))
-        rospy.loginfo(f"[UDP TX] -> {msg}")
+
+        # 【本次修改】：依然是防止心跳包刷屏终端
+        if not msg.startswith("STATUS:"):
+            rospy.loginfo(f"[UDP TX] -> {msg}")
+
     except Exception as e:
         rospy.logerr(f"UDP 遥测发送失败: {e}")
 
@@ -93,6 +97,17 @@ def pause_cb(msg):
         # 强行切入 99 号死锁状态
         fsm_state = STATE_PAUSE
         send_udp_telemetry("STATUS:HOVERING")
+
+
+# 【本次新增】：响应全局查岗指令
+def ping_cb(msg):
+    # 听到吹哨立刻签到
+    send_udp_telemetry("STATUS:FSM_READY")
+
+    # 补发逻辑：如果航线已经加载好且正在死等起飞指令，顺便补发一次许可
+    # 这样就算地面站中途断电重启，起飞按钮也能瞬间重新亮起
+    if fsm_state == STATE_WAIT_TAKEOFF:
+        send_udp_telemetry("REPLY:MISSION_LOADED")
 
 
 def vision_cb(msg):
@@ -143,6 +158,9 @@ def main_loop():
     # 【新增】订阅紧急悬停话题
     rospy.Subscriber("/fsm/pause_cmd", Bool, pause_cb)
 
+    # 【本次新增】：订阅查岗大喇叭
+    rospy.Subscriber("/sys/ping", Bool, ping_cb)
+
     local_pos_pub = rospy.Publisher("mavros/setpoint_position/local", PoseStamped, queue_size=10)
 
     arming_client = rospy.ServiceProxy("mavros/cmd/arming", CommandBool)
@@ -152,6 +170,16 @@ def main_loop():
     dt = 1.0 / 20.0
 
     send_udp_telemetry("STATUS:FSM_READY")
+
+    # ================= 【本次新增】启动前强力去污 =================
+    # 防止上一次测试跑完后，留下了 flight_mission.json，导致开局状态机直接跳转跳过加载
+    if os.path.exists("flight_mission.json"):
+        try:
+            os.remove("flight_mission.json")
+            rospy.loginfo("🗑️ 已自动清理上一次的残留航线文件，确保本次起飞逻辑干净。")
+        except Exception as e:
+            rospy.logerr(f"清理旧航线文件失败: {e}")
+    # ==============================================================
 
     mission_wps = []
 
