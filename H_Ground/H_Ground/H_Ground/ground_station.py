@@ -10,7 +10,7 @@ class MainController:
     def __init__(self):
         self.ui = GroundStationUI()
         self.planner = RoutePlanner()
-        self.comm = UDPComm(local_port=8888, drone_ip="198.162.151.102", drone_port=8889)
+        self.comm = UDPComm(local_port=8888, drone_ip="192.168.151.102", drone_port=8889)
 
         self.bind_signals()
         self.comm.start()

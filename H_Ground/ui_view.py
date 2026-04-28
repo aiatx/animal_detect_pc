@@ -148,6 +148,7 @@ class GroundStationUI(QMainWindow):
         self.grid_data = {}
         self.nofly_zones = set()
         self.detected_cells = set()
+        self.animal_cells = set()
         self.grid_interaction_enabled = True
         self.nofly_locked = False  # 禁飞区锁定状态
         self.columns = [f'A{i}' for i in range(1, 10)]
@@ -234,10 +235,10 @@ class GroundStationUI(QMainWindow):
         
         self.style_nofly = """
             background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
-                stop:0 #f8d7da, stop:1 #f44336);
-            color: #721c24;
+                stop:0 #7f1d1d, stop:1 #3f1010);
+            color: #fbe9e7;
             font-weight: bold;
-            border: 3px solid #c62828;
+            border: 3px solid #5a1313;
             border-radius: 8px;
             font-size: 12px;
         """
@@ -256,6 +257,15 @@ class GroundStationUI(QMainWindow):
             color: #155724;
             font-weight: bold;
             border: 3px solid #388e3c;
+            border-radius: 8px;
+            font-size: 12px;
+        """
+        
+        self.style_animal_found = """
+            background-color: #F8BBD0;
+            color: #6a1b3f;
+            font-weight: bold;
+            border: 3px solid #ec407a;
             border-radius: 8px;
             font-size: 12px;
         """
@@ -338,7 +348,7 @@ class GroundStationUI(QMainWindow):
         ip_layout = QFormLayout(ip_panel)
         ip_layout.setContentsMargins(10, 10, 10, 10)
         
-        self.ip_input = QLineEdit("198.162.151.102")
+        self.ip_input = QLineEdit("192.168.151.102")
         self.port_send_input = QLineEdit("8889")
         self.port_recv_input = QLineEdit("8888")
         
@@ -665,7 +675,10 @@ class GroundStationUI(QMainWindow):
         if grid_id in self.nofly_zones:
             self.nofly_zones.remove(grid_id)
             btn.setText(self.grid_data.get(grid_id, "00000"))
-            btn.setStyleSheet(self.style_done if grid_id in self.detected_cells else self.style_normal)
+            if grid_id in self.animal_cells:
+                btn.setStyleSheet(self.style_animal_found)
+            else:
+                btn.setStyleSheet(self.style_done if grid_id in self.detected_cells else self.style_normal)
         else:
             self.nofly_zones.add(grid_id)
             btn.setText(self.grid_data.get(grid_id, "00000"))
@@ -685,11 +698,14 @@ class GroundStationUI(QMainWindow):
             if gid in self.alarm_cells:
                 btn.setStyleSheet(self.style_alarm)
                 continue
-            if gid in self.detected_cells:
-                btn.setStyleSheet(self.style_done)
-                continue
             if gid in self.nofly_zones:
                 btn.setStyleSheet(self.style_nofly)
+                continue
+            if gid in self.animal_cells:
+                btn.setStyleSheet(self.style_animal_found)
+                continue
+            if gid in self.detected_cells:
+                btn.setStyleSheet(self.style_done)
             else:
                 btn.setStyleSheet(self.style_normal)
 
@@ -722,6 +738,7 @@ class GroundStationUI(QMainWindow):
 
         self.nofly_zones.clear()
         self.detected_cells.clear()
+        self.animal_cells.clear()
         self.alarm_cells.clear()
         for gid in self.grid_widgets:
             if gid != self.start_point:
@@ -829,31 +846,60 @@ class GroundStationUI(QMainWindow):
         """)
 
     def _normalize_animal_code(self, animal_code):
-        digits = "".join([ch for ch in animal_code if ch.isdigit()])
+        if animal_code is None:
+            return None
+        code_text = str(animal_code).strip()
+        if not code_text:
+            return None
+
+        name_map = {
+            "大象": "10000",
+            "猴子": "01000",
+            "孔雀": "00100",
+            "野狼": "00010",
+            "老虎": "00001",
+            "elephant": "10000",
+            "monkey": "01000",
+            "peacock": "00100",
+            "wolf": "00010",
+            "tiger": "00001",
+        }
+        if code_text in name_map:
+            return name_map[code_text]
+        lower_text = code_text.lower()
+        if lower_text in name_map:
+            return name_map[lower_text]
+
+        digits = "".join([ch for ch in code_text if ch.isdigit()])
         if len(digits) >= 5:
             return digits[:5]
-        return digits.rjust(5, "0")
+        return None
 
     def update_grid_result(self, gid, animal_code):
         if gid in self.grid_widgets:
-            # Prevent double counting for revisits/return trips once the cell is confirmed.
-            if gid in self.detected_cells and self.grid_data.get(gid, "00000") != "00000":
-                return
             btn = self.grid_widgets[gid]
             normalized = self._normalize_animal_code(animal_code)
-            self.grid_data[gid] = normalized
+            if not normalized:
+                self.append_log(f"未知动物类别: {animal_code}")
+                return
+            current_code = self.grid_data.get(gid, "00000")
+            if not current_code or len(current_code) != 5 or not current_code.isdigit():
+                current_code = "00000"
+            summed_code = "".join(
+                str(int(current_code[i]) + int(normalized[i])) for i in range(5)
+            )
+            self.grid_data[gid] = summed_code
             self.detected_cells.add(gid)
-            btn.setText(normalized)
+            self.animal_cells.add(gid)
+            btn.setText(self.grid_data[gid])
             if gid in self.alarm_cells:
                 btn.setStyleSheet(self.style_alarm)
             else:
-                btn.setStyleSheet(self.style_done)
+                btn.setStyleSheet(self.style_animal_found)
             self.calculate_totals()
 
     def update_grid_arrival(self, gid):
         if gid not in self.grid_widgets:
-            return
-        if gid in self.detected_cells:
             return
         btn = self.grid_widgets[gid]
         self.detected_cells.add(gid)
