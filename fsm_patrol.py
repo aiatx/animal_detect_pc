@@ -77,7 +77,7 @@ lock_z = 0.0  # 用于保存紧急刹车时的空间快照
 
 # ================= 核心遥测通信系统 =================
 def send_udp_telemetry(msg):
-    GS_IP = "192.168.151.100"
+    GS_IP = "198.162.151.102"
     GS_PORT = 8888
     try:
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)

@@ -7,7 +7,7 @@ from std_msgs.msg import String, Bool
 from ultralytics import YOLO
 
 # ================= 核心遥测通信系统 =================
-GS_IP = "192.168.151.100"
+GS_IP = "198.162.151.102"
 GS_PORT = 8888
 
 
