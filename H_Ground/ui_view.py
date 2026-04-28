@@ -1,6 +1,6 @@
 import math
-from PyQt5.QtWidgets import QMainWindow, QWidget, QGridLayout, QPushButton, QVBoxLayout, QHBoxLayout, QLabel, QSizePolicy, QFormLayout, QLineEdit, QListWidget, QScrollArea
-from PyQt5.QtCore import Qt, QTimer, QPointF
+from PyQt5.QtWidgets import QMainWindow, QWidget, QGridLayout, QPushButton, QVBoxLayout, QHBoxLayout, QLabel, QSizePolicy, QFormLayout, QLineEdit, QListWidget, QScrollArea, QAbstractItemView
+from PyQt5.QtCore import Qt, QTimer, QPointF, QTime
 from PyQt5.QtGui import QFont, QPainter, QPen, QColor, QPolygonF
 
 class PathRenderer(QWidget):
@@ -338,7 +338,7 @@ class GroundStationUI(QMainWindow):
         ip_layout = QFormLayout(ip_panel)
         ip_layout.setContentsMargins(10, 10, 10, 10)
         
-        self.ip_input = QLineEdit("127.0.0.1")
+        self.ip_input = QLineEdit("198.162.151.102")
         self.port_send_input = QLineEdit("8889")
         self.port_recv_input = QLineEdit("8888")
         
@@ -449,36 +449,38 @@ class GroundStationUI(QMainWindow):
         stat_layout.addLayout(stat_grid)
         side_panel.addWidget(stat_panel)
         
-        # ====== 报警记录 ======
-        alarm_panel = QWidget()
-        alarm_panel.setStyleSheet("""
+        # ====== 日志 ======
+        log_panel = QWidget()
+        log_panel.setStyleSheet("""
             background-color: white;
             border-radius: 8px;
-            border: 1px solid #ffcdd2;
+            border: 1px solid #e3f2fd;
         """)
-        alarm_layout = QVBoxLayout(alarm_panel)
-        alarm_layout.setContentsMargins(10, 10, 10, 10)
-        alarm_layout.setSpacing(6)
-        alarm_title = QLabel("报警记录")
-        alarm_title.setFont(QFont('Microsoft YaHei UI', 11, QFont.Bold))
-        alarm_title.setStyleSheet("color: #c62828;")
-        alarm_layout.addWidget(alarm_title)
+        log_layout = QVBoxLayout(log_panel)
+        log_layout.setContentsMargins(10, 10, 10, 10)
+        log_layout.setSpacing(6)
+        log_title = QLabel("日志")
+        log_title.setFont(QFont('Microsoft YaHei UI', 11, QFont.Bold))
+        log_title.setStyleSheet("color: #455a64;")
+        log_layout.addWidget(log_title)
         
-        self.alarm_list = QListWidget()
-        self.alarm_list.setStyleSheet("""
+        self.log_list = QListWidget()
+        self.log_list.setStyleSheet("""
             QListWidget {
                 background-color: white;
                 border-radius: 6px;
-                border: 1px solid #ffcdd2;
-                padding: 4px;
-                color: #b71c1c;
-                font-size: 10px;
+                border: 1px solid #e0e0e0;
+                padding: 6px;
+                color: #37474f;
+                font-size: 11px;
             }
         """)
-        self.alarm_list.setMinimumHeight(120)
-        self.alarm_list.setMaximumHeight(140)
-        alarm_layout.addWidget(self.alarm_list)
-        side_panel.addWidget(alarm_panel)
+        self.log_list.setMinimumHeight(150)
+        self.log_list.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.log_list.setSelectionMode(QListWidget.NoSelection)
+        self.log_list.setFocusPolicy(Qt.NoFocus)
+        log_layout.addWidget(self.log_list)
+        side_panel.addWidget(log_panel)
 
         # ====== 操作按钮 ======
         btn_style_base = """
@@ -712,6 +714,7 @@ class GroundStationUI(QMainWindow):
         if hasattr(self, 'timer'):
             self.timer.stop()
 
+        self.append_log("按钮：全局复位")
         self.manual_btn.blockSignals(True)
         self.manual_btn.setChecked(False)
         self.manual_btn.blockSignals(False)
@@ -742,18 +745,21 @@ class GroundStationUI(QMainWindow):
         self.refresh_grid_styles()
         self.calculate_totals()
         self.update_info_label()
-        if hasattr(self, "alarm_list"):
-            self.alarm_list.clear()
+        self.append_log("任务：全局复位")
         if hasattr(self, "mission_status_lbl"):
             self.update_mission_status("待发送航线")
         self.set_emergency_alert(False)
 
-    def update_status_msg(self, msg):
+    def update_status_msg(self, msg, log=False):
         self.status_lbl.setText(f"通信: {msg}")
+        if log:
+            self.append_log(f"通信：{msg}")
     
-    def update_mission_status(self, msg):
+    def update_mission_status(self, msg, log=True):
         if hasattr(self, "mission_status_lbl"):
             self.mission_status_lbl.setText(f"任务: {msg}")
+        if log:
+            self.append_log(f"任务：{msg}")
     
     def set_takeoff_enabled(self, enabled):
         if hasattr(self, "takeoff_btn"):
@@ -768,10 +774,15 @@ class GroundStationUI(QMainWindow):
             color = self._alert_mission_color if self.emergency_active else self._normal_mission_color
             self.mission_status_lbl.setStyleSheet(f"color: {color};")
     
+    def append_log(self, msg):
+        if not hasattr(self, "log_list"):
+            return
+        timestamp = QTime.currentTime().toString("HH:mm:ss")
+        self.log_list.addItem(f"[{timestamp}] {msg}")
+        self.log_list.scrollToBottom()
+    
     def append_alarm_record(self, record_text):
-        if hasattr(self, "alarm_list"):
-            self.alarm_list.addItem(record_text)
-            self.alarm_list.scrollToBottom()
+        self.append_log(record_text)
     
     def update_grid_alarm(self, gid):
         if gid not in self.grid_widgets:
@@ -969,6 +980,8 @@ class GroundStationUI(QMainWindow):
     def set_manual_mode(self, enabled):
         self.manual_mode = enabled
         self.plan_btn.setEnabled(not enabled)
+        self.append_log("按钮：手动规划开启" if enabled else "按钮：手动规划关闭")
+        self.append_log("任务：手动规划开启" if enabled else "任务：手动规划关闭")
         if enabled:
             # 清空当前航线
             if hasattr(self, 'timer'):

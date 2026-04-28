@@ -13,7 +13,7 @@ class UDPComm(QThread):
     status_received = pyqtSignal(str)
     reply_received = pyqtSignal(str)
 
-    def __init__(self, local_port=8888, drone_ip="192.168.1.100", drone_port=8889):
+    def __init__(self, local_port=8888, drone_ip="198.162.151.102", drone_port=8889):
         super().__init__()
         self.local_port = local_port
         self.drone_ip = drone_ip
