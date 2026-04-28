@@ -4,17 +4,44 @@ import math
 import json
 import time
 import socket
-import os  # <-- 新增：用于检查文件是否存在
+import os  # 用于检查文件是否存在
 from geometry_msgs.msg import PoseStamped
 from mavros_msgs.srv import CommandBool, SetMode
 from mavros_msgs.msg import State
-from std_msgs.msg import String, Bool  # <-- Bool 用于接收起飞和刹车指令
+from std_msgs.msg import String, Bool  # Bool 用于接收起飞和刹车指令
+
+# ================= 硬件: 蜂鸣器驱动 =================
+# 尝试导入 Jetson GPIO 库。如果没装或者没接，代码会自动静默，不会让程序崩溃。
+try:
+    import Jetson.GPIO as GPIO
+
+    HAS_GPIO = True
+    BUZZER_PIN = 12  # 【请根据实际情况修改】Jetson 主板的物理引脚编号 (BOARD 模式)
+
+    GPIO.setmode(GPIO.BOARD)
+    GPIO.setup(BUZZER_PIN, GPIO.OUT, initial=GPIO.LOW)
+    rospy.loginfo(f"√ 蜂鸣器驱动已加载，挂载于物理引脚 {BUZZER_PIN}")
+except Exception as e:
+    HAS_GPIO = False
+    rospy.logwarn(f"未检测到 Jetson.GPIO 或权限不足，蜂鸣器功能已关闭。原因: {e}")
+
+
+def trigger_buzzer():
+    """触发一次 0.3 秒的清脆蜂鸣，异步非阻塞"""
+    if HAS_GPIO:
+        try:
+            GPIO.output(BUZZER_PIN, GPIO.HIGH)
+            # 0.3秒后自动关闭，完全不影响主程序的坐标系结算
+            rospy.Timer(rospy.Duration(0.3), lambda event: GPIO.output(BUZZER_PIN, GPIO.LOW), oneshot=True)
+        except Exception as e:
+            rospy.logerr(f"蜂鸣器触发失败: {e}")
+
 
 # ================= 全局变量与状态枚举 =================
 current_state = State()
 current_pos = PoseStamped()
 
-# 【新增】前置等待状态与紧急状态
+# 前置等待状态与紧急状态
 STATE_WAIT_MISSION = -2
 STATE_WAIT_TAKEOFF = -1
 
@@ -25,7 +52,7 @@ STATE_RETREAT = 3
 STATE_LANDING = 4
 STATE_HOVER_CHECK = 5
 STATE_DRIFT_ALIGN = 6
-STATE_PAUSE = 99  # <-- 【新增】紧急悬停死锁状态
+STATE_PAUSE = 99  # 紧急悬停死锁状态
 
 # 初始状态设为等待航线
 fsm_state = STATE_WAIT_MISSION
@@ -43,7 +70,9 @@ drift_start_time = 0
 
 # 起飞授权锁与紧急刹车锁
 takeoff_cmd_received = False
-lock_x, lock_y, lock_z = 0.0, 0.0, 0.0  # 用于保存紧急刹车时的空间快照
+lock_x = 0.0
+lock_y = 0.0
+lock_z = 0.0  # 用于保存紧急刹车时的空间快照
 
 
 # ================= 核心遥测通信系统 =================
@@ -54,7 +83,7 @@ def send_udp_telemetry(msg):
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         sock.sendto(msg.encode('utf-8'), (GS_IP, GS_PORT))
 
-        # 【本次修改】：依然是防止心跳包刷屏终端
+        # 防止心跳包刷屏终端
         if not msg.startswith("STATUS:"):
             rospy.loginfo(f"[UDP TX] -> {msg}")
 
@@ -81,7 +110,7 @@ def takeoff_cb(msg):
 
 
 def pause_cb(msg):
-    """【新增】接收来自 receiver 的紧急刹车指令"""
+    """接收来自 receiver 的紧急刹车指令"""
     global fsm_state, lock_x, lock_y, lock_z, vision_enabled
     # 只有在非暂停状态下收到 True 才执行刹车，防止重复触发
     if msg.data and fsm_state != STATE_PAUSE:
@@ -99,13 +128,12 @@ def pause_cb(msg):
         send_udp_telemetry("STATUS:HOVERING")
 
 
-# 【本次新增】：响应全局查岗指令
 def ping_cb(msg):
+    """响应全局查岗指令"""
     # 听到吹哨立刻签到
     send_udp_telemetry("STATUS:FSM_READY")
 
     # 补发逻辑：如果航线已经加载好且正在死等起飞指令，顺便补发一次许可
-    # 这样就算地面站中途断电重启，起飞按钮也能瞬间重新亮起
     if fsm_state == STATE_WAIT_TAKEOFF:
         send_udp_telemetry("REPLY:MISSION_LOADED")
 
@@ -125,6 +153,9 @@ def vision_cb(msg):
                 rospy.logwarn(f"!!! 发现新目标: {animal_name}，执行漂移对齐 !!!")
                 detected_animals.add(animal_name)
 
+                # 【触发蜂鸣器】滴——！抓到猎物了！
+                trigger_buzzer()
+
                 # 物理映射
                 offset_x = -err_py * 0.0025
                 offset_y = -err_px * 0.0025
@@ -136,7 +167,7 @@ def vision_cb(msg):
 
                 drift_start_time = time.time()
                 fsm_state = STATE_DRIFT_ALIGN
-        except:
+        except Exception as e:
             pass
 
 
@@ -155,10 +186,7 @@ def main_loop():
     rospy.Subscriber("/vision/animal_detect", String, vision_cb)
 
     rospy.Subscriber("/fsm/takeoff_cmd", Bool, takeoff_cb)
-    # 【新增】订阅紧急悬停话题
     rospy.Subscriber("/fsm/pause_cmd", Bool, pause_cb)
-
-    # 【本次新增】：订阅查岗大喇叭
     rospy.Subscriber("/sys/ping", Bool, ping_cb)
 
     local_pos_pub = rospy.Publisher("mavros/setpoint_position/local", PoseStamped, queue_size=10)
@@ -171,21 +199,20 @@ def main_loop():
 
     send_udp_telemetry("STATUS:FSM_READY")
 
-    # ================= 【本次新增】启动前强力去污 =================
-    # 防止上一次测试跑完后，留下了 flight_mission.json，导致开局状态机直接跳转跳过加载
+    # 启动前强力去污，防止上一次测试残留
     if os.path.exists("flight_mission.json"):
         try:
             os.remove("flight_mission.json")
             rospy.loginfo("🗑️ 已自动清理上一次的残留航线文件，确保本次起飞逻辑干净。")
         except Exception as e:
             rospy.logerr(f"清理旧航线文件失败: {e}")
-    # ==============================================================
 
     mission_wps = []
 
     rospy.loginfo("等待飞控连接...")
     while not rospy.is_shutdown() and not current_state.connected:
         rate.sleep()
+
     rospy.loginfo("飞控已连接！建立心跳包...")
 
     pose = PoseStamped()
@@ -200,7 +227,7 @@ def main_loop():
 
     while not rospy.is_shutdown():
 
-        # 99. 【新增】紧急悬停死锁
+        # 99. 紧急悬停死锁
         if fsm_state == STATE_PAUSE:
             pose.pose.position.x = lock_x
             pose.pose.position.y = lock_y
@@ -251,18 +278,21 @@ def main_loop():
             current_task = target.get("task", "P")
             current_grid_code = target["grid"]
 
-            speed = 2.0 if current_task in ["T", "R", "L"] else 2.0
+            # 【修复动力学】：平稳巡航速度，防止刹车出界
+            speed = 1.0
             vision_enabled = False
 
             step = speed * dt
-            dx, dy = target["x"] - pose.pose.position.x, target["y"] - pose.pose.position.y
+            dx = target["x"] - pose.pose.position.x
+            dy = target["y"] - pose.pose.position.y
             dist = math.sqrt(dx ** 2 + dy ** 2)
 
             if dist > step:
                 pose.pose.position.x += (dx / dist) * step
                 pose.pose.position.y += (dy / dist) * step
             else:
-                pose.pose.position.x, pose.pose.position.y = target["x"], target["y"]
+                pose.pose.position.x = target["x"]
+                pose.pose.position.y = target["y"]
 
             if get_distance(current_pos.pose.position.x, current_pos.pose.position.y, 1.2, target["x"], target["y"],
                             1.2) < TOLERANCE:
@@ -273,16 +303,18 @@ def main_loop():
                 elif current_task == "P":
                     vision_enabled = True
                     hover_start_time = time.time()
-                    fsm_state = STATE_HOVER_CHECK  # 去检查
+                    fsm_state = STATE_HOVER_CHECK
                 else:
                     wp_index += 1
 
-        # 5. 悬停检测 (核心：多兽逻辑的循环入口)
+        # 5. 悬停检测
         elif fsm_state == STATE_HOVER_CHECK:
             target = mission_wps[wp_index]
-            pose.pose.position.x, pose.pose.position.y = target["x"], target["y"]
+            pose.pose.position.x = target["x"]
+            pose.pose.position.y = target["y"]
 
-            if time.time() - hover_start_time > 0.8:
+            # 【完美折中】：给予机身 1.2 秒的刹车稳定和视觉扫描时间
+            if time.time() - hover_start_time > 1.2:
                 rospy.loginfo(f"格子 {target['grid']} 扫描完毕，去下一处。")
                 vision_enabled = False
                 wp_index += 1
@@ -290,27 +322,66 @@ def main_loop():
 
         # 6. 平滑对齐
         elif fsm_state == STATE_DRIFT_ALIGN:
-            pose.pose.position.x, pose.pose.position.y = drift_target_x, drift_target_y
+            pose.pose.position.x = drift_target_x
+            pose.pose.position.y = drift_target_y
             if time.time() - drift_start_time > 3.0:
                 rospy.loginfo(">> 展示完毕，回中心检测是否有遗漏目标...")
                 hover_start_time = time.time()
                 fsm_state = STATE_HOVER_CHECK
 
-        # 3. 退避
+        # 3. 退避 (平滑导引)
         elif fsm_state == STATE_RETREAT:
-            pose.pose.position.x, pose.pose.position.y = 0.0, 1.2
+            # 【修复动力学】：平滑飞向 45 度下滑道的起点，杜绝瞬间扭曲
+            speed = 1.0
+            step = speed * dt
+            dx = 0.0 - pose.pose.position.x
+            dy = 1.2 - pose.pose.position.y
+            dist = math.sqrt(dx ** 2 + dy ** 2)
+
+            if dist > step:
+                pose.pose.position.x += (dx / dist) * step
+                pose.pose.position.y += (dy / dist) * step
+            else:
+                pose.pose.position.x = 0.0
+                pose.pose.position.y = 1.2
+
             if get_distance(current_pos.pose.position.x, current_pos.pose.position.y, 1.2, 0, 1.2, 1.2) < TOLERANCE:
+                rospy.loginfo("到达下滑道起点，开始 45 度降落！")
                 fsm_state = STATE_LANDING
 
-        # 4. 降落
+        # 4. 降落 (完美的 45 度斜线)
         elif fsm_state == STATE_LANDING:
-            pose.pose.position.x, pose.pose.position.y, pose.pose.position.z = 0, 0, 0
-            if current_pos.pose.position.z < 0.1:
+            # 【修复动力学】：X, Y, Z 三轴同时以 0.6m/s 的慢速平滑靠近地面
+            speed = 0.6
+            step = speed * dt
+            dx = 0.0 - pose.pose.position.x
+            dy = 0.0 - pose.pose.position.y
+            dz = 0.0 - pose.pose.position.z
+            dist = math.sqrt(dx ** 2 + dy ** 2 + dz ** 2)
+
+            if dist > step:
+                pose.pose.position.x += (dx / dist) * step
+                pose.pose.position.y += (dy / dist) * step
+                pose.pose.position.z += (dz / dist) * step
+            else:
+                pose.pose.position.x = 0.0
+                pose.pose.position.y = 0.0
+                pose.pose.position.z = 0.0
+
+            # 当真实高度小于 0.15 米时，切入自动落地上锁模式
+            if current_pos.pose.position.z < 0.15:
                 set_mode_client(custom_mode="AUTO.LAND")
                 break
 
         local_pos_pub.publish(pose)
         rate.sleep()
+
+    # 退出前清理 GPIO
+    if HAS_GPIO:
+        try:
+            GPIO.cleanup()
+        except Exception:
+            pass
 
 
 if __name__ == '__main__':

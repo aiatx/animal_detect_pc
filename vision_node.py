@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
 import rospy
 import numpy as np
-import pyrealsense2 as rs
-import socket  # <-- 新增：用于 UDP 通信
-from std_msgs.msg import String
-from std_msgs.msg import Bool  # <-- 【本次新增】：加入 Bool 类型用于查岗话题
+import cv2  # <-- 【核心修改】：已彻底移除 pyrealsense2，换成免驱之王 OpenCV
+import socket
+from std_msgs.msg import String, Bool
 from ultralytics import YOLO
 
 # ================= 核心遥测通信系统 =================
@@ -18,7 +17,7 @@ def send_udp_telemetry(msg):
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         sock.sendto(msg.encode('utf-8'), (GS_IP, GS_PORT))
 
-        # 【本次修改】：过滤掉频繁的心跳包打印，防止终端疯狂刷屏
+        # 过滤掉频繁的心跳包打印，防止终端疯狂刷屏
         if not msg.startswith("STATUS:"):
             rospy.loginfo(f"[UDP TX] -> {msg}")
 
@@ -26,43 +25,42 @@ def send_udp_telemetry(msg):
         rospy.logerr(f"UDP 遥测发送失败: {e}")
 
 
-# 【本次新增】：响应大喇叭查岗的专属回调函数
 def ping_cb(msg):
     # 只要听到 receiver 吹哨，立刻向地面站补发一次自己的存活证明
     send_udp_telemetry("STATUS:VISION_READY")
 
 
 def start_vision_node():
-    rospy.init_node('realsense_yolo_node', anonymous=True)
+    rospy.init_node('usb_cam_yolo_node', anonymous=True)
 
     # 建立与 FSM 通信的专属神经通道
     vision_pub = rospy.Publisher('/vision/animal_detect', String, queue_size=1)
 
-    # 【本次新增】：挂载一只“耳朵”，专门监听全局查岗广播
+    # 挂载一只“耳朵”，专门监听全局查岗广播
     rospy.Subscriber('/sys/ping', Bool, ping_cb)
 
     # ================= 1. 加载 TensorRT 引擎 =================
     rospy.loginfo("正在将 .engine 载入 Jetson 的 GPU...")
     model = YOLO("yolo_middle_best.engine", task="detect")
 
-    # ================= 2. 初始化 Intel RealSense =================
-    rospy.loginfo("正在唤醒 Intel RealSense 深度相机 (Headless 模式)...")
-    pipeline = rs.pipeline()
-    config = rs.config()
+    # ================= 2. 初始化 OpenCV 下视相机 =================
+    cam_index = 0  # 刚才查出来的 /dev/video0
+    rospy.loginfo(f"正在唤醒下视 USB 相机 (设备号: /dev/video{cam_index})...")
 
-    # 强制 640x480 @ 30fps，输出 BGR 格式直接喂给 YOLO
-    config.enable_stream(rs.stream.color, 640, 480, rs.format.bgr8, 30)
+    cap = cv2.VideoCapture(cam_index)
 
-    try:
-        pipeline.start(config)
-        rospy.loginfo("相机启动成功！图像渲染已关闭，算力 100% 倾斜至推理引擎。")
+    # 强制分辨率 640x480，防止有的摄像头默认开 1080P 把算力卡死
+    cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
+    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
 
-        # 【握手协议核心】：通知地面站视觉节点已彻底就绪，随时可以打猎！
-        send_udp_telemetry("STATUS:VISION_READY")
-
-    except Exception as e:
-        rospy.logerr(f"RealSense 启动失败，请检查连线！错误: {e}")
+    if not cap.isOpened():
+        rospy.logerr(f"无法打开 /dev/video{cam_index}！请检查相机硬件或连线。")
         return
+
+    rospy.loginfo("下视相机启动成功！图像渲染已关闭，算力 100% 倾斜至推理引擎。")
+
+    # 通知地面站视觉节点已彻底就绪
+    send_udp_telemetry("STATUS:VISION_READY")
 
     # ================= 3. 定义绝对触发区 (ROI) =================
     center_x = 320
@@ -76,19 +74,19 @@ def start_vision_node():
     roi_x2 = center_x + ROI_HALF_SIZE
     roi_y2 = center_y + ROI_HALF_SIZE
 
-    rate = rospy.Rate(30)
+    # 【核心修改】：帧率降为 15，减轻系统压力，完美契合飞控漂移反馈速度
+    rate = rospy.Rate(15)
 
     try:
         while not rospy.is_shutdown():
-            frames = pipeline.wait_for_frames()
-            color_frame = frames.get_color_frame()
-            if not color_frame:
+            # 抓取一帧
+            ret, frame = cap.read()
+            if not ret:
+                rospy.logwarn_throttle(2.0, "未能获取下视相机画面，检查硬件连接...")
                 continue
 
-            # 直接转成 NumPy 数组，零拷贝开销
-            frame = np.asanyarray(color_frame.get_data())
-
             # ================= 4. TensorRT 推理 =================
+            # OpenCV 读取的 frame 已经是 Numpy 数组且是 BGR 格式，直接喂给 YOLO 即可
             results = model.predict(frame, conf=0.4, verbose=False)
 
             for r in results:
@@ -107,7 +105,7 @@ def start_vision_node():
                         err_px = animal_cx - center_x
                         err_py = animal_cy - center_y
 
-                        # 瞬间发送给 FSM 节点！
+                        # 瞬间发送给 FSM 节点
                         msg_str = f"{class_name}:{err_px:.1f}:{err_py:.1f}"
                         vision_pub.publish(msg_str)
 
@@ -117,8 +115,8 @@ def start_vision_node():
             rate.sleep()
 
     finally:
-        rospy.loginfo("关闭 RealSense 管道...")
-        pipeline.stop()
+        rospy.loginfo("关闭下视相机...")
+        cap.release()
 
 
 if __name__ == '__main__':
