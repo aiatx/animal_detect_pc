@@ -5,7 +5,7 @@ import rospy
 from std_msgs.msg import Bool
 
 # 高级地面站的 IP 和端口 (你需要确保这里和你的实际情况一致)
-GS_IP = "192.168.151.100"
+GS_IP = "192.168.151.101"
 GS_PORT = 8888
 
 
