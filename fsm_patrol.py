@@ -30,9 +30,9 @@ def trigger_buzzer():
     """触发一次 0.3 秒的清脆蜂鸣，异步非阻塞"""
     if HAS_GPIO:
         try:
-            GPIO.output(BUZZER_PIN, GPIO.HIGH)
+            GPIO.output(BUZZER_PIN, GPIO.LOW)
             # 0.3秒后自动关闭，完全不影响主程序的坐标系结算
-            rospy.Timer(rospy.Duration(0.3), lambda event: GPIO.output(BUZZER_PIN, GPIO.LOW), oneshot=True)
+            rospy.Timer(rospy.Duration(0.3), lambda event: GPIO.output(BUZZER_PIN, GPIO.HIGH), oneshot=True)
         except Exception as e:
             rospy.logerr(f"蜂鸣器触发失败: {e}")
 
@@ -77,7 +77,7 @@ lock_z = 0.0  # 用于保存紧急刹车时的空间快照
 
 # ================= 核心遥测通信系统 =================
 def send_udp_telemetry(msg):
-    GS_IP = "198.162.151.101"
+    GS_IP = "192.168.151.101"
     GS_PORT = 8888
     try:
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -221,7 +221,7 @@ def main_loop():
         rate.sleep()
 
     wp_index = 0
-    TOLERANCE = 0.15
+    TOLERANCE = 0.19
 
     rospy.loginfo("========== 状态机心跳启动 ==========")
 
@@ -279,7 +279,7 @@ def main_loop():
             current_grid_code = target["grid"]
 
             # 【修复动力学】：平稳巡航速度，防止刹车出界
-            speed = 1.0
+            speed = 1.2
             vision_enabled = False
 
             step = speed * dt
@@ -313,8 +313,8 @@ def main_loop():
             pose.pose.position.x = target["x"]
             pose.pose.position.y = target["y"]
 
-            # 【完美折中】：给予机身 1.2 秒的刹车稳定和视觉扫描时间
-            if time.time() - hover_start_time > 1.2:
+            # 【完美折中】：给予机身 1.1 秒的刹车稳定和视觉扫描时间
+            if time.time() - hover_start_time > 1.1:
                 rospy.loginfo(f"格子 {target['grid']} 扫描完毕，去下一处。")
                 vision_enabled = False
                 wp_index += 1
@@ -324,7 +324,7 @@ def main_loop():
         elif fsm_state == STATE_DRIFT_ALIGN:
             pose.pose.position.x = drift_target_x
             pose.pose.position.y = drift_target_y
-            if time.time() - drift_start_time > 3.0:
+            if time.time() - drift_start_time > 2.0:
                 rospy.loginfo(">> 展示完毕，回中心检测是否有遗漏目标...")
                 hover_start_time = time.time()
                 fsm_state = STATE_HOVER_CHECK
@@ -368,8 +368,8 @@ def main_loop():
                 pose.pose.position.y = 0.0
                 pose.pose.position.z = 0.0
 
-            # 当真实高度小于 0.15 米时，切入自动落地上锁模式
-            if current_pos.pose.position.z < 0.15:
+            # 当真实高度小于 0.05 米时，切入自动落地上锁模式
+            if current_pos.pose.position.z < 0.05:
                 set_mode_client(custom_mode="AUTO.LAND")
                 break
 
