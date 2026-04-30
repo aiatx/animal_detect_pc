@@ -28,8 +28,8 @@ class UDPComm(QThread):
             # 开启 SO_REUSEADDR 允许重新绑定断开未释分的端口
             self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
             self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-            # 绑定树莓派自己的端口，准备接收飞机的回复
-            self.sock.bind(('', self.local_port))
+            # 绑定所有的IP：绑定树莓派自己的端口，接收来自任意源端口的 UDP 数据
+            self.sock.bind(('0.0.0.0', self.local_port)) 
             # 发射状态信号给 UI
             self.status_update.emit(f"UDP 监听已启动 (端口: {self.local_port})")
         except Exception as e:
@@ -38,10 +38,13 @@ class UDPComm(QThread):
 
         while self.is_running:
             try:
-                # 接收数据 (非阻塞设计)
-                self.sock.settimeout(0.1) 
-                data, addr = self.sock.recvfrom(1024)
-                message = data.decode('utf-8').strip()
+                # 疯狂读取！榨干缓冲区，取消 socket 的 timeout 和循环内 sleep
+                data, addr = self.sock.recvfrom(4096)
+                try:
+                    message = data.decode('utf-8', errors="replace").strip()
+                except Exception:
+                    message = ""
+                    
                 if message:
                     if message.startswith("STATUS:"):
                         payload = message.split(":", 1)[1].strip()
@@ -74,15 +77,14 @@ class UDPComm(QThread):
                         else:
                             self.data_received.emit(message)
                     else:
-                        # 收到真实数据，立刻发射给主控 (ground_station.py 里的 handle_drone_data)
+                        # 收到真实数据，立刻发射给主控
                         self.data_received.emit(message)
-            except socket.timeout:
-                pass # 超时是正常的，说明这 0.1 秒内没收到数据，继续循环即可
+            except OSError:
+                if not self.is_running:
+                    break
             except Exception:
                 pass
                 
-            time.sleep(0.01) # 稍微休息 10ms，防止吃满树莓派的单核 CPU
-
     def send_data(self, data_str):
         """主程序用来发送航线给飞机的接口"""
         if self.sock:
