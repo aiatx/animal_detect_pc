@@ -1,5 +1,7 @@
 import sys
+import random
 from PyQt5.QtWidgets import QApplication
+from PyQt5.QtCore import QTimer
 from ui_view import GroundStationUI
 from algorithm import RoutePlanner
 from comm_link import UDPComm
@@ -8,11 +10,29 @@ class MainController:
     def __init__(self):
         self.ui = GroundStationUI()
         self.planner = RoutePlanner()
-        self.comm = UDPComm(local_port=8888, drone_ip="192.168.1.100", drone_port=8889)
+        self.comm = UDPComm(local_port=8888, drone_ip="192.168.151.102", drone_port=8889)
 
         self.bind_signals()
         self.comm.start()
+        self._start_ping_timer()
         self.ui.show()
+
+    def _start_ping_timer(self):
+        self.ping_timer = QTimer()
+        self.ping_timer.setSingleShot(True)
+        self.ping_timer.timeout.connect(self._send_ping)
+        self._schedule_ping()
+
+    def _schedule_ping(self):
+        interval_ms = random.randint(1000, 2000)
+        self.ping_timer.start(interval_ms)
+
+    def _send_ping(self):
+        try:
+            if self.comm and self.comm.isRunning():
+                self.comm.send_data("CMD:PING")
+        finally:
+            self._schedule_ping()
 
     def bind_signals(self):
         self.ui.plan_btn.clicked.connect(self.handle_plan_route)

@@ -88,6 +88,7 @@ def run_mock_drone():
 
         print(f"\n[无线电] 接收到航线！共 {len(route_entries)} 个航点。")
         animal_map = _allocate_animals(route_entries)
+        reported_grids = set()
 
         print("[飞控] 靶标已随机分布。电机解锁，准备起飞...\n")
         time.sleep(0.4)
@@ -106,14 +107,21 @@ def run_mock_drone():
             time.sleep(0.15)
 
             if grid_id != START_POINT:
-                counts = animal_map.get(grid_id, [0, 0, 0, 0, 0])
-                animals_str = "".join(map(str, counts))
-                legacy_payload = f"{grid_id}:{animals_str}"
-                _send_udp(sock, legacy_payload)
-                if animals_str != "00000":
-                    print(f"     🎯 [识别] 上报目标: {legacy_payload}")
+                if grid_id in reported_grids:
+                    print(f"     [识别] 已上报过 {grid_id}，跳过重复上报。")
                 else:
-                    print(f"     [识别] 区域安全，未发现动物。{legacy_payload}")
+                    counts = animal_map.get(grid_id, [0, 0, 0, 0, 0])
+                    animal_names = ["大象", "猴子", "孔雀", "野狼", "老虎"]
+                    total_animals = sum(counts)
+                    if total_animals:
+                        for idx, count in enumerate(counts):
+                            for _ in range(count):
+                                payload = f"REPORT:{animal_names[idx]}@{grid_id}"
+                                _send_udp(sock, payload)
+                                print(f"     🎯 [识别] 上报目标: {payload}")
+                    else:
+                        print("     [识别] 区域安全，未发现动物。")
+                    reported_grids.add(grid_id)
 
             current_grid = grid_id
 

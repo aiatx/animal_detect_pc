@@ -21,6 +21,8 @@ def run_mock_drone():
             valid_wps = [wp.split(':')[0] for wp in route if wp != 'A9_B1' and wp != 'A9_B1:P' and wp != 'A9_B1:L' and wp != 'A9_B1:T' and wp != 'A9_B1:R'] # 排除起飞区
             animal_map = {wp: [0, 0, 0, 0, 0] for wp in valid_wps}
 
+            reported_wps = set()
+
             if valid_wps:
                 # 0:大象(4), 1:猴子(2), 2:孔雀(2), 3:野狼(2), 4:老虎(2)
                 # 总计 12 只动物，构成一个固定的池子
@@ -46,6 +48,11 @@ def run_mock_drone():
                 print(f"  -> [飞行中] 全速前往目标点 {wp_full} ...")
                 time.sleep(0.6) # 模拟飞行时间
 
+                # 若已上报过该格子，跳过重复上报
+                if wp in reported_wps:
+                    print(f"     [摄像头] 已上报过 {wp}，跳过重复上报。")
+                    continue
+
                 # 从预先分配好的沙盘里提取该格子的动物数量
                 counts = animal_map.get(wp, [0, 0, 0, 0, 0])
                 animals_str = "".join(map(str, counts))
@@ -58,6 +65,8 @@ def run_mock_drone():
                     print(f"     📸 [摄像头] 发现目标！上传特征数据: {feedback}")
                 else:
                     print(f"     [摄像头] 区域安全，未发现动物。{feedback}")
+
+                reported_wps.add(wp)
 
             print("\n[飞控] 航线执行完毕！执行 RTL 直线返航降落...")
             time.sleep(0.6)

@@ -1,6 +1,6 @@
 import math
-from PyQt5.QtWidgets import QMainWindow, QWidget, QGridLayout, QPushButton, QVBoxLayout, QHBoxLayout, QLabel, QSizePolicy, QFormLayout, QLineEdit, QListWidget, QScrollArea
-from PyQt5.QtCore import Qt, QTimer, QPointF
+from PyQt5.QtWidgets import QMainWindow, QWidget, QGridLayout, QPushButton, QVBoxLayout, QHBoxLayout, QLabel, QSizePolicy, QFormLayout, QLineEdit, QListWidget, QScrollArea, QAbstractItemView
+from PyQt5.QtCore import Qt, QTimer, QPointF, QTime
 from PyQt5.QtGui import QFont, QPainter, QPen, QColor, QPolygonF
 
 class PathRenderer(QWidget):
@@ -148,6 +148,7 @@ class GroundStationUI(QMainWindow):
         self.grid_data = {}
         self.nofly_zones = set()
         self.detected_cells = set()
+        self.animal_cells = set()
         self.grid_interaction_enabled = True
         self.nofly_locked = False  # 禁飞区锁定状态
         self.columns = [f'A{i}' for i in range(1, 10)]
@@ -234,10 +235,10 @@ class GroundStationUI(QMainWindow):
         
         self.style_nofly = """
             background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
-                stop:0 #f8d7da, stop:1 #f44336);
-            color: #721c24;
+                stop:0 #7f1d1d, stop:1 #3f1010);
+            color: #fbe9e7;
             font-weight: bold;
-            border: 3px solid #c62828;
+            border: 3px solid #5a1313;
             border-radius: 8px;
             font-size: 12px;
         """
@@ -256,6 +257,15 @@ class GroundStationUI(QMainWindow):
             color: #155724;
             font-weight: bold;
             border: 3px solid #388e3c;
+            border-radius: 8px;
+            font-size: 12px;
+        """
+        
+        self.style_animal_found = """
+            background-color: #F8BBD0;
+            color: #6a1b3f;
+            font-weight: bold;
+            border: 3px solid #ec407a;
             border-radius: 8px;
             font-size: 12px;
         """
@@ -338,7 +348,7 @@ class GroundStationUI(QMainWindow):
         ip_layout = QFormLayout(ip_panel)
         ip_layout.setContentsMargins(10, 10, 10, 10)
         
-        self.ip_input = QLineEdit("127.0.0.1")
+        self.ip_input = QLineEdit("192.168.151.102")
         self.port_send_input = QLineEdit("8889")
         self.port_recv_input = QLineEdit("8888")
         
@@ -449,36 +459,38 @@ class GroundStationUI(QMainWindow):
         stat_layout.addLayout(stat_grid)
         side_panel.addWidget(stat_panel)
         
-        # ====== 报警记录 ======
-        alarm_panel = QWidget()
-        alarm_panel.setStyleSheet("""
+        # ====== 日志 ======
+        log_panel = QWidget()
+        log_panel.setStyleSheet("""
             background-color: white;
             border-radius: 8px;
-            border: 1px solid #ffcdd2;
+            border: 1px solid #e3f2fd;
         """)
-        alarm_layout = QVBoxLayout(alarm_panel)
-        alarm_layout.setContentsMargins(10, 10, 10, 10)
-        alarm_layout.setSpacing(6)
-        alarm_title = QLabel("报警记录")
-        alarm_title.setFont(QFont('Microsoft YaHei UI', 11, QFont.Bold))
-        alarm_title.setStyleSheet("color: #c62828;")
-        alarm_layout.addWidget(alarm_title)
+        log_layout = QVBoxLayout(log_panel)
+        log_layout.setContentsMargins(10, 10, 10, 10)
+        log_layout.setSpacing(6)
+        log_title = QLabel("日志")
+        log_title.setFont(QFont('Microsoft YaHei UI', 11, QFont.Bold))
+        log_title.setStyleSheet("color: #455a64;")
+        log_layout.addWidget(log_title)
         
-        self.alarm_list = QListWidget()
-        self.alarm_list.setStyleSheet("""
+        self.log_list = QListWidget()
+        self.log_list.setStyleSheet("""
             QListWidget {
                 background-color: white;
                 border-radius: 6px;
-                border: 1px solid #ffcdd2;
-                padding: 4px;
-                color: #b71c1c;
-                font-size: 10px;
+                border: 1px solid #e0e0e0;
+                padding: 6px;
+                color: #37474f;
+                font-size: 11px;
             }
         """)
-        self.alarm_list.setMinimumHeight(120)
-        self.alarm_list.setMaximumHeight(140)
-        alarm_layout.addWidget(self.alarm_list)
-        side_panel.addWidget(alarm_panel)
+        self.log_list.setMinimumHeight(150)
+        self.log_list.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.log_list.setSelectionMode(QListWidget.NoSelection)
+        self.log_list.setFocusPolicy(Qt.NoFocus)
+        log_layout.addWidget(self.log_list)
+        side_panel.addWidget(log_panel)
 
         # ====== 操作按钮 ======
         btn_style_base = """
@@ -663,7 +675,10 @@ class GroundStationUI(QMainWindow):
         if grid_id in self.nofly_zones:
             self.nofly_zones.remove(grid_id)
             btn.setText(self.grid_data.get(grid_id, "00000"))
-            btn.setStyleSheet(self.style_done if grid_id in self.detected_cells else self.style_normal)
+            if grid_id in self.animal_cells:
+                btn.setStyleSheet(self.style_animal_found)
+            else:
+                btn.setStyleSheet(self.style_done if grid_id in self.detected_cells else self.style_normal)
         else:
             self.nofly_zones.add(grid_id)
             btn.setText(self.grid_data.get(grid_id, "00000"))
@@ -683,11 +698,14 @@ class GroundStationUI(QMainWindow):
             if gid in self.alarm_cells:
                 btn.setStyleSheet(self.style_alarm)
                 continue
-            if gid in self.detected_cells:
-                btn.setStyleSheet(self.style_done)
-                continue
             if gid in self.nofly_zones:
                 btn.setStyleSheet(self.style_nofly)
+                continue
+            if gid in self.animal_cells:
+                btn.setStyleSheet(self.style_animal_found)
+                continue
+            if gid in self.detected_cells:
+                btn.setStyleSheet(self.style_done)
             else:
                 btn.setStyleSheet(self.style_normal)
 
@@ -712,6 +730,7 @@ class GroundStationUI(QMainWindow):
         if hasattr(self, 'timer'):
             self.timer.stop()
 
+        self.append_log("按钮：全局复位")
         self.manual_btn.blockSignals(True)
         self.manual_btn.setChecked(False)
         self.manual_btn.blockSignals(False)
@@ -719,6 +738,7 @@ class GroundStationUI(QMainWindow):
 
         self.nofly_zones.clear()
         self.detected_cells.clear()
+        self.animal_cells.clear()
         self.alarm_cells.clear()
         for gid in self.grid_widgets:
             if gid != self.start_point:
@@ -742,18 +762,21 @@ class GroundStationUI(QMainWindow):
         self.refresh_grid_styles()
         self.calculate_totals()
         self.update_info_label()
-        if hasattr(self, "alarm_list"):
-            self.alarm_list.clear()
+        self.append_log("任务：全局复位")
         if hasattr(self, "mission_status_lbl"):
             self.update_mission_status("待发送航线")
         self.set_emergency_alert(False)
 
-    def update_status_msg(self, msg):
+    def update_status_msg(self, msg, log=False):
         self.status_lbl.setText(f"通信: {msg}")
+        if log:
+            self.append_log(f"通信：{msg}")
     
-    def update_mission_status(self, msg):
+    def update_mission_status(self, msg, log=True):
         if hasattr(self, "mission_status_lbl"):
             self.mission_status_lbl.setText(f"任务: {msg}")
+        if log:
+            self.append_log(f"任务：{msg}")
     
     def set_takeoff_enabled(self, enabled):
         if hasattr(self, "takeoff_btn"):
@@ -768,10 +791,15 @@ class GroundStationUI(QMainWindow):
             color = self._alert_mission_color if self.emergency_active else self._normal_mission_color
             self.mission_status_lbl.setStyleSheet(f"color: {color};")
     
+    def append_log(self, msg):
+        if not hasattr(self, "log_list"):
+            return
+        timestamp = QTime.currentTime().toString("HH:mm:ss")
+        self.log_list.addItem(f"[{timestamp}] {msg}")
+        self.log_list.scrollToBottom()
+    
     def append_alarm_record(self, record_text):
-        if hasattr(self, "alarm_list"):
-            self.alarm_list.addItem(record_text)
-            self.alarm_list.scrollToBottom()
+        self.append_log(record_text)
     
     def update_grid_alarm(self, gid):
         if gid not in self.grid_widgets:
@@ -818,31 +846,60 @@ class GroundStationUI(QMainWindow):
         """)
 
     def _normalize_animal_code(self, animal_code):
-        digits = "".join([ch for ch in animal_code if ch.isdigit()])
+        if animal_code is None:
+            return None
+        code_text = str(animal_code).strip()
+        if not code_text:
+            return None
+
+        name_map = {
+            "大象": "10000",
+            "猴子": "01000",
+            "孔雀": "00100",
+            "野狼": "00010",
+            "老虎": "00001",
+            "elephant": "10000",
+            "monkey": "01000",
+            "peacock": "00100",
+            "wolf": "00010",
+            "tiger": "00001",
+        }
+        if code_text in name_map:
+            return name_map[code_text]
+        lower_text = code_text.lower()
+        if lower_text in name_map:
+            return name_map[lower_text]
+
+        digits = "".join([ch for ch in code_text if ch.isdigit()])
         if len(digits) >= 5:
             return digits[:5]
-        return digits.rjust(5, "0")
+        return None
 
     def update_grid_result(self, gid, animal_code):
         if gid in self.grid_widgets:
-            # Prevent double counting for revisits/return trips once the cell is confirmed.
-            if gid in self.detected_cells and self.grid_data.get(gid, "00000") != "00000":
-                return
             btn = self.grid_widgets[gid]
             normalized = self._normalize_animal_code(animal_code)
-            self.grid_data[gid] = normalized
+            if not normalized:
+                self.append_log(f"未知动物类别: {animal_code}")
+                return
+            current_code = self.grid_data.get(gid, "00000")
+            if not current_code or len(current_code) != 5 or not current_code.isdigit():
+                current_code = "00000"
+            summed_code = "".join(
+                str(int(current_code[i]) + int(normalized[i])) for i in range(5)
+            )
+            self.grid_data[gid] = summed_code
             self.detected_cells.add(gid)
-            btn.setText(normalized)
+            self.animal_cells.add(gid)
+            btn.setText(self.grid_data[gid])
             if gid in self.alarm_cells:
                 btn.setStyleSheet(self.style_alarm)
             else:
-                btn.setStyleSheet(self.style_done)
+                btn.setStyleSheet(self.style_animal_found)
             self.calculate_totals()
 
     def update_grid_arrival(self, gid):
         if gid not in self.grid_widgets:
-            return
-        if gid in self.detected_cells:
             return
         btn = self.grid_widgets[gid]
         self.detected_cells.add(gid)
@@ -969,6 +1026,8 @@ class GroundStationUI(QMainWindow):
     def set_manual_mode(self, enabled):
         self.manual_mode = enabled
         self.plan_btn.setEnabled(not enabled)
+        self.append_log("按钮：手动规划开启" if enabled else "按钮：手动规划关闭")
+        self.append_log("任务：手动规划开启" if enabled else "任务：手动规划关闭")
         if enabled:
             # 清空当前航线
             if hasattr(self, 'timer'):

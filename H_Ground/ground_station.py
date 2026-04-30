@@ -1,5 +1,7 @@
 import sys
+import random
 from PyQt5.QtWidgets import QApplication
+from PyQt5.QtCore import QTimer
 from ui_view import GroundStationUI
 from algorithm import RoutePlanner, compress_route
 from comm_link import UDPComm
@@ -8,11 +10,60 @@ class MainController:
     def __init__(self):
         self.ui = GroundStationUI()
         self.planner = RoutePlanner()
-        self.comm = UDPComm(local_port=8888, drone_ip="127.0.0.1", drone_port=8889)
+        self.comm = UDPComm(local_port=8888, drone_ip="192.168.151.102", drone_port=8889)
+        self._reset_handshake_state()
 
         self.bind_signals()
         self.comm.start()
+        self._start_ping_timer()
         self.ui.show()
+
+    def _start_ping_timer(self):
+        self.ping_timer = QTimer()
+        self.ping_timer.setSingleShot(True)
+        self.ping_timer.timeout.connect(self._send_ping)
+        self._schedule_ping()
+
+    def _schedule_ping(self):
+        interval_ms = random.randint(1000, 2000)
+        self.ping_timer.start(interval_ms)
+
+    def _send_ping(self):
+        try:
+            if self.comm and self.comm.isRunning():
+                self.comm.send_data("CMD:PING")
+        finally:
+            self._schedule_ping()
+
+    def _reset_handshake_state(self):
+        self.flight_started = False
+        self._handshake_logged = {
+            "receiver_ready": False,
+            "fsm_ready": False,
+            "route_sent": False,
+            "mission_saved": False,
+            "mission_loaded": False,
+            "takeoff_sent": False,
+            "takeoff_success": False
+        }
+
+    def _log_once(self, key, message):
+        if self._handshake_logged.get(key):
+            return False
+        self._handshake_logged[key] = True
+        if hasattr(self.ui, "append_log"):
+            self.ui.append_log(message)
+        return True
+
+    def _mark_takeoff_success(self):
+        if not self._handshake_logged.get("takeoff_sent"):
+            return
+        if self._handshake_logged.get("takeoff_success"):
+            return
+        self._handshake_logged["takeoff_success"] = True
+        self.flight_started = True
+        if hasattr(self.ui, "append_log"):
+            self.ui.append_log("起飞成功")
 
     def bind_signals(self):
         self.ui.plan_btn.clicked.connect(self.handle_plan_route)
@@ -32,6 +83,9 @@ class MainController:
 
     def handle_apply_ip(self):
         new_ip = self.ui.ip_input.text().strip()
+        old_ip = getattr(self.comm, "drone_ip", "")
+        old_send_port = getattr(self.comm, "drone_port", 0)
+        old_recv_port = getattr(self.comm, "local_port", 0)
         
         try:
             new_send_port = int(self.ui.port_send_input.text().strip())
@@ -60,9 +114,20 @@ class MainController:
         
         # 4. Start again
         self.comm.start()
+        self._reset_handshake_state()
+        if hasattr(self.ui, "append_log"):
+            if (old_ip != new_ip) or (old_send_port != new_send_port) or (old_recv_port != new_recv_port):
+                self.ui.append_log(
+                    f"通信：网络配置变化 (本地端口 {old_recv_port} -> {new_recv_port}, "
+                    f"目标 {old_ip}:{old_send_port} -> {new_ip}:{new_send_port})"
+                )
+            self.ui.append_log("通信：网络配置应用成功")
 
     def handle_plan_route(self):
         nofly_zones = self.ui.nofly_zones
+        if hasattr(self.ui, "append_log"):
+            self.ui.append_log("按钮：自动规划")
+            self.ui.append_log("任务：自动规划开始")
         result = self.planner.plan_route(nofly_zones)
         
         # 处理不同返回格式的兼容性
@@ -80,6 +145,8 @@ class MainController:
         
         # 基于检测状态进行航点合并
         detected_route = compress_route(merged_route, self.ui.detected_cells)
+        if hasattr(self.ui, "append_log"):
+            self.ui.append_log(f"任务：自动规划完成，航点数 {len(detected_route or [])}")
 
         # 兜底保障：航线最后必须回到起飞区
         if detected_route:
@@ -98,6 +165,9 @@ class MainController:
         route_list = self.ui.route_list
         if not route_list or len(route_list) < 2:
             return
+        if hasattr(self.ui, "append_log"):
+            self.ui.append_log("航线已发送，等待 receiver 保存")
+        self._handshake_logged["route_sent"] = True
             
         # 1. 计算正确的返航点(R)起始索引：最后一个出现的新网格(P)的下一个点
         temp_visited = set()
@@ -135,7 +205,7 @@ class MainController:
         self.comm.send_data(route_str)
         self.ui.set_grid_interaction(False)
         if hasattr(self.ui, "update_mission_status"):
-            self.ui.update_mission_status("等待机载端确认")
+            self.ui.update_mission_status("等待机载端确认", log=False)
         if hasattr(self.ui, "set_takeoff_enabled"):
             self.ui.set_takeoff_enabled(False)
 
@@ -174,18 +244,26 @@ class MainController:
         self.ui.update_grid_result(grid_id, animal_code)
         if hasattr(self.ui, "update_grid_alarm"):
             self.ui.update_grid_alarm(grid_id)
-        if hasattr(self.ui, "append_alarm_record"):
-            self.ui.append_alarm_record(f"{animal_code}@{grid_id}")
+        self._mark_takeoff_success()
+        if hasattr(self.ui, "append_log"):
+            self.ui.append_log(f"[识别] {grid_id} 上报 {animal_code}")
         if hasattr(self.ui, "update_plane_position"):
             self.ui.update_plane_position(grid_id)
 
     def handle_legacy_report(self, grid_id, animal_code):
         self.ui.update_grid_result(grid_id, animal_code)
+        self._mark_takeoff_success()
+        if hasattr(self.ui, "append_log"):
+            self.ui.append_log(f"[识别] {grid_id} 上报 {animal_code}")
         if hasattr(self.ui, "update_plane_position"):
             self.ui.update_plane_position(grid_id)
 
     def handle_drone_arrival(self, grid_id):
-        self.ui.update_status_msg(f"无人机已抵达 {grid_id}")
+        if hasattr(self.ui, "update_mission_status"):
+            self.ui.update_mission_status(f"无人机已抵达 {grid_id}", log=False)
+        self._mark_takeoff_success()
+        if hasattr(self.ui, "append_log"):
+            self.ui.append_log(f"[遥测] 无人机抵达 {grid_id}")
         if hasattr(self.ui, "update_grid_arrival"):
             self.ui.update_grid_arrival(grid_id)
         if hasattr(self.ui, "update_plane_position"):
@@ -198,46 +276,92 @@ class MainController:
             "RECEIVER_READY": "RECEIVER",
             "FSM_READY": "FSM"
         }
+        node_labels = {
+            "VISION": "视觉节点",
+            "RECEIVER": "接收节点",
+            "FSM": "飞控大脑"
+        }
         if status_key == "HOVERING":
             if hasattr(self.ui, "set_emergency_alert"):
                 self.ui.set_emergency_alert(True)
             if hasattr(self.ui, "update_mission_status"):
-                self.ui.update_mission_status("已紧急刹车，坐标锁定")
+                self.ui.update_mission_status("已紧急刹车，坐标锁定", log=False)
+            if hasattr(self.ui, "append_log"):
+                self.ui.append_log("[警告] 已紧急刹车，坐标锁定")
             if hasattr(self.ui, "set_takeoff_enabled"):
                 self.ui.set_takeoff_enabled(False)
             return
-
+        
         node_key = mapping.get(status_key)
         if node_key and hasattr(self.ui, "set_node_ready"):
             self.ui.set_node_ready(node_key, True)
+            if not self.flight_started:
+                if node_key == "RECEIVER":
+                    self._log_once("receiver_ready", "接收节点已就绪")
+                elif node_key == "FSM":
+                    self._log_once("fsm_ready", "飞控大脑已就绪")
+            return
+        if status_key.startswith("VISION") or status_key.startswith("RECEIVER") or status_key.startswith("FSM"):
+            return
+        task_status_map = {
+            "MISSION_RUNNING": "任务执行中",
+            "MISSION_START": "任务执行中",
+            "EXECUTING": "任务执行中",
+            "RETURN_HOME": "返航",
+            "RETURNING": "返航中",
+            "LANDING": "降落",
+            "GLOBAL_RESET": "全局复位",
+            "MISSION_FINISHED": "任务完成",
+            "MISSION_DONE": "任务完成",
+            "MISSION_COMPLETE": "任务完成"
+        }
+        task_status = task_status_map.get(status_key)
+        if task_status:
+            if status_key in ("MISSION_RUNNING", "MISSION_START", "EXECUTING"):
+                self._mark_takeoff_success()
+            if hasattr(self.ui, "update_mission_status"):
+                self.ui.update_mission_status(task_status, log=False)
+            if hasattr(self.ui, "append_log") and status_key not in ("MISSION_RUNNING", "MISSION_START", "EXECUTING"):
+                self.ui.append_log(f"[任务] {task_status}")
+            if status_key == "GLOBAL_RESET":
+                self._reset_handshake_state()
 
     def handle_drone_reply(self, reply):
         reply_key = reply.strip().upper()
         if reply_key == "MISSION_SAVED":
             if hasattr(self.ui, "update_mission_status"):
-                self.ui.update_mission_status("无人机已接收并保存航线")
+                self.ui.update_mission_status("无人机已接收并保存航线", log=False)
             if hasattr(self.ui, "set_takeoff_enabled"):
                 self.ui.set_takeoff_enabled(False)
+            self._log_once("mission_saved", "receiver 已保存航线")
         elif reply_key == "MISSION_LOADED":
             if hasattr(self.ui, "update_mission_status"):
-                self.ui.update_mission_status("无人机状态机已成功加载航线，准许起飞")
+                self.ui.update_mission_status("无人机状态机已成功加载航线，准许起飞", log=False)
             if hasattr(self.ui, "set_takeoff_enabled"):
                 self.ui.set_takeoff_enabled(True)
+            self._log_once("mission_loaded", "FSM 已加载航线，等待起飞授权")
         else:
             if hasattr(self.ui, "update_mission_status"):
-                self.ui.update_mission_status(f"未知回复: {reply}")
+                self.ui.update_mission_status(f"未知回复: {reply}", log=False)
+            if hasattr(self.ui, "append_log"):
+                self.ui.append_log(f"[警告] 未知回复: {reply}")
 
     def handle_takeoff_authorize(self):
+        if hasattr(self.ui, "append_log"):
+            self.ui.append_log("已发送起飞指令 CMD:TAKEOFF")
         self.comm.send_data("CMD:TAKEOFF")
+        self._handshake_logged["takeoff_sent"] = True
         if hasattr(self.ui, "set_takeoff_enabled"):
             self.ui.set_takeoff_enabled(False)
         if hasattr(self.ui, "update_mission_status"):
-            self.ui.update_mission_status("已发送起飞授权")
+            self.ui.update_mission_status("已发送起飞授权", log=False)
 
     def handle_emergency_pause(self):
+        if hasattr(self.ui, "append_log"):
+            self.ui.append_log("[警告] 已发送紧急刹车指令")
         self.comm.send_data("CMD:PAUSE")
         if hasattr(self.ui, "update_mission_status"):
-            self.ui.update_mission_status("已发送紧急刹车指令")
+            self.ui.update_mission_status("已发送紧急刹车指令", log=False)
 
 if __name__ == '__main__':
     app = QApplication(sys.argv)
