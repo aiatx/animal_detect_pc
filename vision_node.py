@@ -7,7 +7,7 @@ from std_msgs.msg import String, Bool
 from ultralytics import YOLO
 
 # ================= 核心遥测通信系统 =================
-GS_IP = "192.168.151.101"
+GS_IP = "192.168.151.101" # ⚠️ 注意：如果你地面站IP今天是 101，记得改一下这里！
 GS_PORT = 8888
 
 
@@ -39,9 +39,11 @@ def start_vision_node():
     # 挂载一只“耳朵”，专门监听全局查岗广播
     rospy.Subscriber('/sys/ping', Bool, ping_cb)
 
-    # ================= 1. 加载 TensorRT 引擎 =================
+    # ================= 1. 加载 TensorRT 引擎 (绝对路径修改) =================
     rospy.loginfo("正在将 .engine 载入 Jetson 的 GPU...")
-    model = YOLO("yolo_middle_best.engine", task="detect")
+    # 填入你们 ROS 包里的绝对路径，确保 systemd 守护进程能找到模型
+    ENGINE_PATH = "/home/nvidia/catkin_ws/src/animal_detect/best26_map0.72.engine"
+    model = YOLO(ENGINE_PATH, task="detect")
 
     # ================= 2. 初始化 OpenCV 下视相机 =================
     cam_index = 0  # 刚才查出来的 /dev/video0

@@ -32,21 +32,23 @@ def main():
             if cmd == "CMD:LAUNCH":
                 print("🎯 收到地面站启动指令！准备起爆 ROS 系统！")
 
-                # 【极其关键的一步】：必须释放 8889 端口！
-                # 否则一会 receiver.py 启动时会报 "Address already in use" 错误！
+                # 释放端口，让 receiver.py 能接管
                 sock.close()
                 time.sleep(0.5)
 
-                # 4. 执行 Launch 文件
-                # 注意：你现在还没建包没关系，到时候建好了把这里的路径替换掉就行
-                launch_cmd = "bash -c 'source /opt/ros/noetic/setup.bash && source /home/nvidia/catkin_ws/devel/setup.bash && roslaunch your_package your_launch_file.launch'"
+                launch_cmd = "bash -c 'source /opt/ros/noetic/setup.bash && source /home/nvidia/catkin_ws/devel/setup.bash && roslaunch animal_detect start_all.launch'"
 
                 print(f"执行命令: {launch_cmd}")
 
-                # Popen 会在后台把整个 ROS 系统拉起来，然后这个 Python 脚本就可以功成身退了
-                subprocess.Popen(launch_cmd, shell=True)
+                # 【终极修复】：用 os.system 阻塞式运行！
+                # 这样引导程序会一直“撑着”不退出，欺骗 systemd 大管家它还在上班。
+                # roslaunch 就能在它撑起的保护伞下完美运行！
+                import os
+                os.system(launch_cmd)
 
-                sys.exit(0)  # 退出引导程序，将舞台交给真正的飞控节点
+                # 一旦 roslaunch 因为意外崩溃退出，这里再退出，
+                # 触发 systemd 的 Restart=on-failure，5秒后又会自动开始监听地面站指令！
+                sys.exit(0)
 
         except socket.timeout:
             continue
