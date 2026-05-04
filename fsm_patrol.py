@@ -10,6 +10,10 @@ from mavros_msgs.srv import CommandBool, SetMode
 from mavros_msgs.msg import State
 from std_msgs.msg import String, Bool  # Bool 用于接收起飞和刹车指令
 
+# ================= 绝对路径定义 =================
+# 【核心修正】：统一使用绝对路径，防止后台自启时找不到文件
+MISSION_FILE = "/home/nvidia/flight_mission.json"
+
 # ================= 硬件: 蜂鸣器驱动 =================
 # 尝试导入 Jetson GPIO 库。如果没装或者没接，代码会自动静默，不会让程序崩溃。
 try:
@@ -59,8 +63,17 @@ fsm_state = STATE_WAIT_MISSION
 
 # 视觉与追踪全局变量
 vision_enabled = False
+
+# 已上报目标集合：按“格子 + 动物类别”去重。
+# 作用：同一个格子里同一种动物不重复上报；不同格子出现同一种动物仍然会分别上报。
 detected_animals = set()
+
 current_grid_code = "UNKNOWN"
+
+# 每个格子的最终识别结果。
+# 记录格式：{"A9_B1": "cat", "A9_B2": "pig"}
+# 作用：一个格子确认识别后，后续重复视觉信号直接忽略，避免地面站结果反复刷新。
+final_results = {}
 
 # 悬停与漂移计时/坐标
 hover_start_time = 0
@@ -140,23 +153,36 @@ def ping_cb(msg):
 
 def vision_cb(msg):
     global fsm_state, detected_animals, current_grid_code, vision_enabled
-    global drift_target_x, drift_target_y, drift_start_time
+    global drift_target_x, drift_target_y, drift_start_time, final_results
 
     if vision_enabled and fsm_state == STATE_HOVER_CHECK:
+
+        # 如果当前格子已经锁定识别结果，直接忽略后续视觉信号。
+        # 注意：这里只限制“同一个格子”重复上报，不影响其他格子识别同一种动物。
+        if current_grid_code in final_results:
+            return
+
         try:
             parts = msg.data.split(':')
             animal_name = parts[0]
             err_px = float(parts[1])
             err_py = float(parts[2])
 
-            if animal_name not in detected_animals:
-                rospy.logwarn(f"!!! 发现新目标: {animal_name}，执行漂移对齐 !!!")
-                detected_animals.add(animal_name)
+            # 去重键必须包含格子编号，不能只按 animal_name 去重。
+            # 否则 A1 识别到 cat 后，B2 再识别到 cat 会被误判为重复目标。
+            detection_key = (current_grid_code, animal_name)
+
+            if detection_key not in detected_animals:
+                rospy.logwarn(f"!!! 发现新目标: {animal_name}@{current_grid_code}，执行漂移对齐 !!!")
+                detected_animals.add(detection_key)
+
+                # 锁定该格子的最终识别结果，防止同一格子反复上报。
+                final_results[current_grid_code] = animal_name
 
                 # 【触发蜂鸣器】滴——！抓到猎物了！
                 trigger_buzzer()
 
-                # 物理映射
+                # 物理映射：根据图像中心偏差，计算小范围漂移补偿量。
                 offset_x = -err_py * 0.0025
                 offset_y = -err_px * 0.0025
 
@@ -178,7 +204,7 @@ def get_distance(p1_x, p1_y, p1_z, p2_x, p2_y, p2_z):
 # ================= 主循环 =================
 def main_loop():
     global fsm_state, vision_enabled, current_grid_code, hover_start_time
-    global takeoff_cmd_received, lock_x, lock_y, lock_z
+    global takeoff_cmd_received, lock_x, lock_y, lock_z, final_results
     rospy.init_node('fsm_patrol_node', anonymous=True)
 
     rospy.Subscriber("mavros/state", State, state_cb)
@@ -199,11 +225,11 @@ def main_loop():
 
     send_udp_telemetry("STATUS:FSM_READY")
 
-    # 启动前强力去污，防止上一次测试残留
-    if os.path.exists("flight_mission.json"):
+    # 启动前强力去污，防止上一次测试残留（使用绝对路径）
+    if os.path.exists(MISSION_FILE):
         try:
-            os.remove("flight_mission.json")
-            rospy.loginfo("🗑️ 已自动清理上一次的残留航线文件，确保本次起飞逻辑干净。")
+            os.remove(MISSION_FILE)
+            rospy.loginfo(f"🗑️ 已自动清理上一次的残留航线文件 {MISSION_FILE}，确保本次起飞逻辑干净。")
         except Exception as e:
             rospy.logerr(f"清理旧航线文件失败: {e}")
 
@@ -221,7 +247,7 @@ def main_loop():
         rate.sleep()
 
     wp_index = 0
-    TOLERANCE = 0.19
+    TOLERANCE = 0.16
 
     rospy.loginfo("========== 状态机心跳启动 ==========")
 
@@ -236,9 +262,10 @@ def main_loop():
 
         # -2. 等待航线文件
         elif fsm_state == STATE_WAIT_MISSION:
-            if os.path.exists("flight_mission.json"):
+            # 【核心修正】：读取绝对路径
+            if os.path.exists(MISSION_FILE):
                 try:
-                    with open("flight_mission.json", "r") as f:
+                    with open(MISSION_FILE, "r") as f:
                         mission_wps = json.load(f)
                     rospy.loginfo(f"√ 成功加载航点文件！共包含 {len(mission_wps)} 个航点。")
 
@@ -301,9 +328,14 @@ def main_loop():
                     vision_enabled = False
                     fsm_state = STATE_RETREAT
                 elif current_task == "P":
-                    vision_enabled = True
-                    hover_start_time = time.time()
-                    fsm_state = STATE_HOVER_CHECK
+                    # 如果该格子已经有最终识别结果，直接跳过悬停检查，避免重复扫描和重复上报。
+                    if current_grid_code in final_results:
+                        rospy.loginfo(f"检测到格子 {current_grid_code} 已识别过，跳过悬停检查逻辑。")
+                        wp_index += 1
+                    else:
+                        vision_enabled = True
+                        hover_start_time = time.time()
+                        fsm_state = STATE_HOVER_CHECK
                 else:
                     wp_index += 1
 
@@ -313,8 +345,8 @@ def main_loop():
             pose.pose.position.x = target["x"]
             pose.pose.position.y = target["y"]
 
-            # 【完美折中】：给予机身 1.1 秒的刹车稳定和视觉扫描时间
-            if time.time() - hover_start_time > 1.1:
+            # 【完美折中】：给予机身 1.3 秒的刹车稳定和视觉扫描时间
+            if time.time() - hover_start_time > 1.3:
                 rospy.loginfo(f"格子 {target['grid']} 扫描完毕，去下一处。")
                 vision_enabled = False
                 wp_index += 1
@@ -368,8 +400,8 @@ def main_loop():
                 pose.pose.position.y = 0.0
                 pose.pose.position.z = 0.0
 
-            # 当真实高度小于 0.05 米时，切入自动落地上锁模式
-            if current_pos.pose.position.z < 0.05:
+            # 当真实高度小于 0.03 米时，切入自动落地上锁模式
+            if current_pos.pose.position.z < 0.03:
                 set_mode_client(custom_mode="AUTO.LAND")
                 break
 
