@@ -11,6 +11,11 @@ from ultralytics import YOLO
 GS_IP = "192.168.151.101"
 GS_PORT = 8888
 
+# 视觉识别使能开关。
+# 默认关闭：只有 FSM 确认无人机到达格子中心并发布 /vision/enable=True 后，才会运行 YOLO 推理。
+vision_enabled = False
+detection_counts = {}
+
 
 def send_udp_telemetry(msg):
     try:
@@ -26,10 +31,34 @@ def ping_cb(msg):
     send_udp_telemetry("STATUS:VISION_READY")
 
 
+def vision_enable_cb(msg):
+    """接收 FSM 的视觉使能。
+
+    False：巡航/起飞/返航/降落阶段，只读相机，不跑 YOLO，不发布识别。
+    True ：已到达格子中心并进入悬停检查阶段，开始 YOLO 推理。
+    """
+    global vision_enabled, detection_counts
+
+    new_state = bool(msg.data)
+    if new_state == vision_enabled:
+        return
+
+    vision_enabled = new_state
+    detection_counts.clear()
+
+    if vision_enabled:
+        rospy.logwarn("视觉识别已使能：开始检测当前格子")
+    else:
+        rospy.loginfo("视觉识别已关闭：未到格子中心，不进行检测")
+
+
 def start_vision_node():
+    global vision_enabled, detection_counts
+
     rospy.init_node('usb_cam_yolo_node', anonymous=True)
     vision_pub = rospy.Publisher('/vision/animal_detect', String, queue_size=1)
     rospy.Subscriber('/sys/ping', Bool, ping_cb)
+    rospy.Subscriber('/vision/enable', Bool, vision_enable_cb)
 
     # ================= 1. 加载 TensorRT 引擎 =================
     rospy.loginfo("正在载入 TensorRT 引擎...")
@@ -66,7 +95,6 @@ def start_vision_node():
     center_y = 240
     TRIGGER_RADIUS = 80
     CONFIRM_FRAMES = 3
-    detection_counts = {}
 
     rate = rospy.Rate(15)
 
@@ -75,6 +103,13 @@ def start_vision_node():
             ret, frame = cap.read()
             if not ret:
                 rospy.logwarn_throttle(2.0, "未能获取相机画面...")
+                continue
+
+            # 没有收到 FSM 使能时，不进行 YOLO 推理，也不发布识别结果。
+            # 仍然持续读相机，避免下次使能时拿到旧帧。
+            if not vision_enabled:
+                detection_counts.clear()
+                rate.sleep()
                 continue
 
             # ================= 4. YOLO 推理 =================

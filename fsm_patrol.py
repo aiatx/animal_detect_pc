@@ -64,6 +64,11 @@ fsm_state = STATE_WAIT_MISSION
 # 视觉与追踪全局变量
 vision_enabled = False
 
+# 视觉节点使能发布器。
+# FSM 只有在无人机真正到达巡查格子中心并进入悬停检查状态时，才允许视觉节点开始 YOLO 推理。
+vision_enable_pub = None
+last_vision_enable_cmd = None
+
 # 已上报目标集合：按“格子 + 动物类别”去重。
 # 作用：同一个格子里同一种动物不重复上报；不同格子出现同一种动物仍然会分别上报。
 detected_animals = set()
@@ -104,6 +109,30 @@ def send_udp_telemetry(msg):
         rospy.logerr(f"UDP 遥测发送失败: {e}")
 
 
+def set_vision_enable(enabled, reason=""):
+    """统一控制视觉节点使能，避免巡航途中误识别。
+
+    enabled=True  只在无人机到达当前格子中心、进入悬停检查时发送。
+    enabled=False 在巡航、起飞、返航、降落、急停、漂移对齐等阶段发送。
+    """
+    global vision_enabled, vision_enable_pub, last_vision_enable_cmd
+
+    enabled = bool(enabled)
+    vision_enabled = enabled
+
+    # 只在状态变化时发布，避免 20Hz 刷屏和刷话题。
+    if last_vision_enable_cmd == enabled:
+        return
+
+    last_vision_enable_cmd = enabled
+
+    if vision_enable_pub is not None:
+        vision_enable_pub.publish(Bool(enabled))
+
+    if reason:
+        rospy.loginfo(f"视觉识别{'开启' if enabled else '关闭'}：{reason}")
+
+
 # ================= 回调函数 =================
 def state_cb(msg):
     global current_state
@@ -124,7 +153,7 @@ def takeoff_cb(msg):
 
 def pause_cb(msg):
     """接收来自 receiver 的紧急刹车指令"""
-    global fsm_state, lock_x, lock_y, lock_z, vision_enabled
+    global fsm_state, lock_x, lock_y, lock_z
     # 只有在非暂停状态下收到 True 才执行刹车，防止重复触发
     if msg.data and fsm_state != STATE_PAUSE:
         rospy.logerr("!!! 触发紧急刹车！立刻拍下空间坐标快照 !!!")
@@ -134,7 +163,7 @@ def pause_cb(msg):
         lock_z = current_pos.pose.position.z
 
         # 强行切断视觉神经，防止此时动物乱入改变状态
-        vision_enabled = False
+        set_vision_enable(False, "紧急刹车")
 
         # 强行切入 99 号死锁状态
         fsm_state = STATE_PAUSE
@@ -179,6 +208,9 @@ def vision_cb(msg):
                 # 锁定该格子的最终识别结果，防止同一格子反复上报。
                 final_results[current_grid_code] = animal_name
 
+                # 目标已经确认，漂移对齐阶段不再继续跑视觉，避免离开格子中心后误触发。
+                set_vision_enable(False, "目标已确认，准备漂移对齐")
+
                 # 【触发蜂鸣器】滴——！抓到猎物了！
                 trigger_buzzer()
 
@@ -203,8 +235,9 @@ def get_distance(p1_x, p1_y, p1_z, p2_x, p2_y, p2_z):
 
 # ================= 主循环 =================
 def main_loop():
-    global fsm_state, vision_enabled, current_grid_code, hover_start_time
+    global fsm_state, current_grid_code, hover_start_time
     global takeoff_cmd_received, lock_x, lock_y, lock_z, final_results
+    global vision_enable_pub
     rospy.init_node('fsm_patrol_node', anonymous=True)
 
     rospy.Subscriber("mavros/state", State, state_cb)
@@ -216,6 +249,10 @@ def main_loop():
     rospy.Subscriber("/sys/ping", Bool, ping_cb)
 
     local_pos_pub = rospy.Publisher("mavros/setpoint_position/local", PoseStamped, queue_size=10)
+
+    # 视觉使能话题：latch=True 保证视觉节点后启动时也能收到最近一次开关状态。
+    vision_enable_pub = rospy.Publisher("/vision/enable", Bool, queue_size=1, latch=True)
+    set_vision_enable(False, "FSM启动，默认关闭")
 
     arming_client = rospy.ServiceProxy("mavros/cmd/arming", CommandBool)
     set_mode_client = rospy.ServiceProxy("mavros/set_mode", SetMode)
@@ -255,6 +292,7 @@ def main_loop():
 
         # 99. 紧急悬停死锁
         if fsm_state == STATE_PAUSE:
+            set_vision_enable(False, "紧急悬停中")
             pose.pose.position.x = lock_x
             pose.pose.position.y = lock_y
             pose.pose.position.z = lock_z
@@ -278,6 +316,7 @@ def main_loop():
 
         # -1. 等待起飞授权
         elif fsm_state == STATE_WAIT_TAKEOFF:
+            set_vision_enable(False, "等待起飞授权")
             rospy.loginfo_throttle(2.0, "[待命] 航线已装载，等待地面站下发【起飞指令】...")
             if takeoff_cmd_received:
                 rospy.logwarn(">>> 收到起飞指令，进入解锁起飞序列！ <<<")
@@ -285,6 +324,7 @@ def main_loop():
 
         # 0. 待机与解锁
         elif fsm_state == STATE_IDLE:
+            set_vision_enable(False, "解锁/切OFFBOARD阶段")
             if current_state.mode != "OFFBOARD":
                 set_mode_client(custom_mode="OFFBOARD")
             elif not current_state.armed:
@@ -294,6 +334,7 @@ def main_loop():
 
         # 1. 起飞
         elif fsm_state == STATE_TAKEOFF:
+            set_vision_enable(False, "起飞阶段")
             pose.pose.position.z = 1.2
             if abs(current_pos.pose.position.z - 1.2) < TOLERANCE:
                 fsm_state = STATE_PATROL
@@ -307,7 +348,7 @@ def main_loop():
 
             # 【修复动力学】：平稳巡航速度，防止刹车出界
             speed = 1.2
-            vision_enabled = False
+            set_vision_enable(False, "巡航中，未到格子中心")
 
             step = speed * dt
             dx = target["x"] - pose.pose.position.x
@@ -325,15 +366,17 @@ def main_loop():
                             1.2) < TOLERANCE:
                 send_udp_telemetry(f"ARRIVED:{target['grid']}")
                 if current_task == "L":
-                    vision_enabled = False
+                    set_vision_enable(False, "进入返航/降落点")
                     fsm_state = STATE_RETREAT
                 elif current_task == "P":
                     # 如果该格子已经有最终识别结果，直接跳过悬停检查，避免重复扫描和重复上报。
                     if current_grid_code in final_results:
+                        set_vision_enable(False, "当前格子已有结果，跳过重复扫描")
                         rospy.loginfo(f"检测到格子 {current_grid_code} 已识别过，跳过悬停检查逻辑。")
                         wp_index += 1
                     else:
-                        vision_enabled = True
+                        # 只有到达格子中心并准备悬停检查时，才真正打开视觉节点。
+                        set_vision_enable(True, f"到达格子中心 {current_grid_code}")
                         hover_start_time = time.time()
                         fsm_state = STATE_HOVER_CHECK
                 else:
@@ -348,12 +391,13 @@ def main_loop():
             # 【完美折中】：给予机身 1.3 秒的刹车稳定和视觉扫描时间
             if time.time() - hover_start_time > 1.3:
                 rospy.loginfo(f"格子 {target['grid']} 扫描完毕，去下一处。")
-                vision_enabled = False
+                set_vision_enable(False, "当前格子扫描结束")
                 wp_index += 1
                 fsm_state = STATE_PATROL
 
         # 6. 平滑对齐
         elif fsm_state == STATE_DRIFT_ALIGN:
+            set_vision_enable(False, "漂移对齐中，暂不检测")
             pose.pose.position.x = drift_target_x
             pose.pose.position.y = drift_target_y
             if time.time() - drift_start_time > 2.0:
@@ -363,6 +407,7 @@ def main_loop():
 
         # 3. 退避 (平滑导引)
         elif fsm_state == STATE_RETREAT:
+            set_vision_enable(False, "返航退避中")
             # 【修复动力学】：平滑飞向 45 度下滑道的起点，杜绝瞬间扭曲
             speed = 1.0
             step = speed * dt
@@ -383,6 +428,7 @@ def main_loop():
 
         # 4. 降落 (完美的 45 度斜线)
         elif fsm_state == STATE_LANDING:
+            set_vision_enable(False, "降落阶段")
             # 【修复动力学】：X, Y, Z 三轴同时以 0.6m/s 的慢速平滑靠近地面
             speed = 0.6
             step = speed * dt
@@ -407,6 +453,8 @@ def main_loop():
 
         local_pos_pub.publish(pose)
         rate.sleep()
+
+    set_vision_enable(False, "FSM退出")
 
     # 退出前清理 GPIO
     if HAS_GPIO:
